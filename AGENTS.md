@@ -1,0 +1,3 @@
+# slicc-media
+
+`@ai-ecoverse/slicc-media`: `media` and `mediaprobe`, ffmpeg-style commands as one slicc-kernel `abi: "js"` module (`dist/media.mjs`, esbuild from `src/`). Codecs come only from the browser's WebCodecs; never add codec code, an ffmpeg build or a mediabunny codec extension, and never name the commands ffmpeg/ffprobe. README.md is the spec. No comments in files we write; no CLAUDE.md. Unit tests stay in the gitignored `test/unit/` (100% diff coverage at commit); integration tests in `test/integration/` run on the Node kernel and, under the shared-web harness, in Chromium. Chromium runs take `lockf -k /tmp/slicc-heavy.lock`. Releases come from `main` only.

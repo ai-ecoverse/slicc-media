@@ -1,0 +1,80 @@
+{
+  "name": "@ai-ecoverse/slicc-media",
+  "version": "0.0.0",
+  "description": "media and mediaprobe for SLICC: ffmpeg-style probing and converting on the browser's WebCodecs and mediabunny, with no codecs of its own",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ai-ecoverse/slicc-media.git"
+  },
+  "homepage": "https://github.com/ai-ecoverse/slicc-media",
+  "bugs": {
+    "url": "https://github.com/ai-ecoverse/slicc-media/issues"
+  },
+  "engines": {
+    "node": ">=24",
+    "slicc-kernel": ">=1.102.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "fledgling": {
+    "provider": "github",
+    "workflow": "release.yml",
+    "repo": "ai-ecoverse/slicc-media",
+    "publish": true
+  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "dist"
+  ],
+  "slicc": {
+    "commands": {
+      "media": {
+        "abi": "js",
+        "module": "dist/media.mjs"
+      },
+      "mediaprobe": {
+        "abi": "js",
+        "module": "dist/media.mjs",
+        "args": [
+          "--probe"
+        ]
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepare": "lefthook install && npm run build",
+    "prepack": "npm run build",
+    "lint": "slicc-lint",
+    "typecheck": "tsc",
+    "test": "npm run build && node --test --test-timeout=300000 --test-global-setup=node_modules/@ai-ecoverse/slicc-shared-web/harness/global.mjs test/integration/*.test.mjs",
+    "test:unit": "mcr -c node_modules/@ai-ecoverse/slicc-shared-web/mcr.config.mjs node --test 'test/unit/**/*.test.ts'",
+    "trust": "npx fledgling sync -y --skip-publish",
+    "trust:dry": "npx fledgling sync --dry-run -y --skip-publish",
+    "release": "semantic-release"
+  },
+  "devDependencies": {
+    "@ai-ecoverse/slicc-kernel": "1.102.2",
+    "@ai-ecoverse/slicc-shared-web": "1.21.0",
+    "@ai-ecoverse/wasm-bash": "5.3.0-18",
+    "@ai-ecoverse/wasm-coreutils": "9.12.0-7",
+    "@biomejs/biome": "2.5.15",
+    "@types/node": "26.6.5",
+    "esbuild": "0.28.2",
+    "lefthook": "2.2.1",
+    "mediabunny": "1.61.3",
+    "monocart-coverage-reports": "2.13.2",
+    "playwright-core": "1.64.1",
+    "semantic-release": "25.0.9",
+    "typescript": "7.0.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "lefthook@2.2.1": true
+  }
+}
