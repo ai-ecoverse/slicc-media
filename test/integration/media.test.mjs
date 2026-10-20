@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { after, before, describe, it } from 'node:test';
 import { boot } from './kernel.mjs';
 
@@ -11,6 +12,10 @@ before(async () => {
 after(() => os?.close());
 
 const sh = (script) => os.sh(script);
+
+const mediabunny = JSON.parse(
+  readFileSync(new URL('../../node_modules/mediabunny/package.json', import.meta.url), 'utf8')
+).version;
 
 const NO_WEBCODECS =
   'WebCodecs is not available in this runtime; probing, stream copy (-c copy) and PCM work, re-encoding needs a browser';
@@ -90,7 +95,12 @@ describe('media on the Node kernel', () => {
   it('says what it is', async () => {
     const r = await sh('media -version');
     assert.equal(r.status, 0);
-    assert.match(r.stdout, /^media \S+ \(@ai-ecoverse\/slicc-media\), mediabunny 1\.61\.3\n/);
+    assert.match(
+      r.stdout,
+      new RegExp(
+        `^media \\S+ \\(@ai-ecoverse/slicc-media\\), mediabunny ${mediabunny.replaceAll('.', '\\.')}\n`
+      )
+    );
     assert.match(r.stdout, /This is not FFmpeg/);
   });
 
