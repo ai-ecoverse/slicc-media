@@ -7,48 +7,41 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
+  actions: read
+  issues: write
+  pull-requests: write
+  statuses: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      LEFTHOOK: '0'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+  ci:
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/pipeline.yml@v2.8.4
+    secrets: inherit
+    with:
+      node-version: '24'
+      test-glob: test/integration/*.test.mjs
+      shards: 2
+      review-prompt: |
+        SLICC-MEDIA
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: 24
-          cache: npm
+        This repository is slicc-media (`@ai-ecoverse/slicc-media`): `media` and `mediaprobe`, ffmpeg-style commands shipped as one slicc-kernel `abi: "js"` module (`dist/media.mjs`, bundled with esbuild from `src/`). The README is the spec: read the sections the change touches first. `git diff origin/main...HEAD`, or `$RUNNER_TEMP/review/context/pr.diff`, is the change.
 
-      - run: npm ci
+        Once this pull request passes the merge queue, semantic-release publishes it to npm from `main`. Review it as the last check before it ships.
 
-      - run: npm run lint
+        Look for real defects, in this order:
+        1. Correctness against the README: options, stream selection, probing output, exit codes and error messages, and how a conversion behaves when the browser's WebCodecs lacks a codec.
+        2. Codecs come only from WebCodecs through mediabunny: no codec code, no ffmpeg build, no mediabunny codec extension, and the commands are never named ffmpeg or ffprobe.
+        3. Data loss: output files that are truncated, overwritten without asking, or left half-written on failure.
+        4. Packaging: `files` ships everything `dist/media.mjs` loads, and the `slicc.commands` entries keep working on the slicc-kernel version `engines` names.
+        5. Tests: every behaviour change has an integration test in `test/integration/`, and a fix's test fails without the fix.
+        6. Repo rules: no comments anywhere, no unit tests in git, and a conventional-commit title (`fix`, `feat` and `perf` release, the rest don't).
 
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      LEFTHOOK: '0'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        Run `npm run build` in a tree before you read or run its `dist/`. `test/integration/media.test.mjs` runs on the kernel's Node entry and needs no browser; `browser.test.mjs` runs in Chromium through the shared-web harness. Don't report style preferences, or anything you haven't confirmed in the code or by a run.
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: 24
-          cache: npm
-
-      - run: npm ci
-
-      - name: Install Chromium
-        run: npx playwright-core install --with-deps chromium
-
-      - run: npm test
-
-      - run: npm pack --dry-run --ignore-scripts
+        Severity: deny for a confirmed P1 or P2: a crash, corrupt output, a regression in a common conversion or probe without a workaround, a behaviour change without its test, or a fix whose test passes without it. A narrow problem with a workaround is P3: comment with a repro and approve.
