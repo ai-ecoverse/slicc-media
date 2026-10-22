@@ -63,7 +63,7 @@ One input and one output. The options:
 
 ## Licences
 
-The package is Apache-2.0. `dist/media.mjs` bundles mediabunny 1.61.4, unmodified, which is MPL-2.0: its licence is `dist/mediabunny-LICENSE`, and its source is at [github.com/Vanilagy/mediabunny](https://github.com/Vanilagy/mediabunny/tree/v1.61.4) and in the [mediabunny npm package](https://www.npmjs.com/package/mediabunny/v/1.61.4). None of mediabunny's codec extension packages are included. The test fixtures in `test/integration/fixtures/` are a few KB of generated media.
+The package is Apache-2.0. `dist/media.mjs` bundles mediabunny 1.61.5, unmodified, which is MPL-2.0: its licence is `dist/mediabunny-LICENSE`, and its source is at [github.com/Vanilagy/mediabunny](https://github.com/Vanilagy/mediabunny/tree/v1.61.5) and in the [mediabunny npm package](https://www.npmjs.com/package/mediabunny/v/1.61.5). None of mediabunny's codec extension packages are included. The test fixtures in `test/integration/fixtures/` are a few KB of generated media.
 
 The argv handling, the plan translation and the probe output are ported from SLICC 6's `ffmpeg` and `ffprobe` commands (Apache-2.0), without their ffmpeg.wasm engine.
 
