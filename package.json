@@ -59,7 +59,7 @@
     "release": "semantic-release"
   },
   "devDependencies": {
-    "@ai-ecoverse/slicc-cdp": "1.41.13",
+    "@ai-ecoverse/slicc-cdp": "1.41.16",
     "@ai-ecoverse/slicc-kernel": "1.166.4",
     "@ai-ecoverse/slicc-shared-web": "2.12.3",
     "@ai-ecoverse/wasm-bash": "5.3.0-23",
