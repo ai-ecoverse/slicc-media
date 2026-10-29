@@ -22,7 +22,6 @@ cat clip.webm | mediaprobe -of json -show_format -
 ```
 
 It reads the container's index and decodes nothing, so it works on every container mediabunny reads (mp4/mov, webm/mkv, mp3, wav, ogg, flac, aac, mpegts), whether or not this browser can decode the codec, and in the Node entry too.
-
 - **Options:** `-i FILE` or a bare `FILE` (`-` or `pipe:0` reads stdin), `-show_format`, `-show_streams`, `-show_entries format=a,b:stream=c,d`, `-select_streams v|a|v:N|a:N`, `-count_packets`, `-of`/`-print_format json|csv[=p=0]|default[=nw=1:nk=1]`, `-v`/`-loglevel` (`quiet` silences errors), `-hide_banner`.
 - **Fields:** format `filename`, `nb_streams`, `format_name`, `duration`, `start_time`, `size`, `bit_rate`; streams `index`, `codec_type`, `codec_name`, `width`, `height`, `r_frame_rate`, `avg_frame_rate`, `sample_rate`, `channels`, `channel_layout`, `bit_rate`, `duration`, `nb_read_packets`. Names and formats are ffprobe's (`h264`, `pcm_s16le`, `matroska,webm`, six-decimal seconds). A field the container doesn't give is left out, never guessed.
 - Without `-show_*` or `-of`, it prints a short human summary.
@@ -40,17 +39,16 @@ media -i clip.mp4 -c copy -f mpegts - | mediaprobe -
 
 One input and one output. The options:
 
-| | |
-|---|---|
-| input and output | `-i FILE` (`-` or `pipe:0` is stdin), `OUTPUT` (`-` or `pipe:1` is stdout, with `-f`), `-f FMT` for the output container (otherwise the extension), `-y`, `-n` |
-| codecs | `-c copy`, `-c:v`/`-vcodec` `libx264`/`h264`, `libx265`/`hevc`, `libvpx`/`vp8`, `libvpx-vp9`/`vp9`, `libaom-av1`/`libsvtav1`/`av1`, `copy`; `-c:a`/`-acodec` `aac`, `libopus`, `libmp3lame`, `libvorbis`, `flac`, `pcm_s16le` and the other `pcm_*`, `copy` |
-| rates and quality | `-b:v`, `-b:a`, `-crf` and `-q:a` (mapped to mediabunny's five quality presets: approximate), `-g` with `-r` |
-| trim | `-ss`, `-t`, `-to` before or after `-i`. With `-c copy`, the cut starts at the key frame before `-ss`, as in FFmpeg |
-| video | `-vf` with `scale=W:H` (`-1`/`-2` keep the aspect ratio), `crop=w:h:x:y`, `transpose=1\|2`, `fps=N`, `format=yuv420p`, chained in that order; `-s WxH`, `-r FPS`, `-vn` |
-| audio | `-af aresample=RATE`, `-ar`, `-ac`, `-an` |
-| other | `-metadata title=…` (and `artist`, `album`, `album_artist`, `genre`, `comment`, `description`), `-movflags faststart` or `frag_keyframe`, `-map 0`, `-nostats`, `-v quiet\|error` |
-| info | `-version`, `-h`, `-formats`, `-encoders` and `-decoders` (asked of the browser each time) |
-
+|                   |                                                                                                                                                                                                                                                             |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| input and output  | `-i FILE` (`-` or `pipe:0` is stdin), `OUTPUT` (`-` or `pipe:1` is stdout, with `-f`), `-f FMT` for the output container (otherwise the extension), `-y`, `-n`                                                                                              |
+| codecs            | `-c copy`, `-c:v`/`-vcodec` `libx264`/`h264`, `libx265`/`hevc`, `libvpx`/`vp8`, `libvpx-vp9`/`vp9`, `libaom-av1`/`libsvtav1`/`av1`, `copy`; `-c:a`/`-acodec` `aac`, `libopus`, `libmp3lame`, `libvorbis`, `flac`, `pcm_s16le` and the other `pcm_*`, `copy` |
+| rates and quality | `-b:v`, `-b:a`, `-crf` and `-q:a` (mapped to mediabunny's five quality presets: approximate), `-g` with `-r`                                                                                                                                                |
+| trim              | `-ss`, `-t`, `-to` before or after `-i`. With `-c copy`, the cut starts at the key frame before `-ss`, as in FFmpeg                                                                                                                                         |
+| video             | `-vf` with `scale=W:H` (`-1`/`-2` keep the aspect ratio), `crop=w:h:x:y`, `transpose=1\|2`, `fps=N`, `format=yuv420p`, chained in that order; `-s WxH`, `-r FPS`, `-vn`                                                                                     |
+| audio             | `-af aresample=RATE`, `-ar`, `-ac`, `-an`                                                                                                                                                                                                                   |
+| other             | `-metadata title=…` (and `artist`, `album`, `album_artist`, `genre`, `comment`, `description`), `-movflags faststart` or `frag_keyframe`, `-map 0`, `-nostats`, `-v quiet\|error`                                                                           |
+| info              | `-version`, `-h`, `-formats`, `-encoders` and `-decoders` (asked of the browser each time)                                                                                                                                                                  |
 - **Codecs:** every encode and decode is the browser's. Chromium has VP8, VP9, AV1 and Opus encoders everywhere; H.264, HEVC and AAC depend on the build and the platform; MP3, Vorbis and FLAC encoders are usually missing. There is no fallback: when the browser lacks one, `media` names the stream and the codec and exits 1, for example `media: video stream #0:0: no decoder for 'h264' (this browser has none)`. `media -encoders` lists what this browser can encode.
 - **Without WebCodecs** (the kernel's Node entry), probing, stream copy and PCM audio work, and anything that needs a decoder or an encoder fails with a message that says so.
 - **Stream copy:** `-c copy` copies or fails, it never re-encodes; a codec the output container can't hold is an error (`'h264' cannot be stream-copied into webm here`).
