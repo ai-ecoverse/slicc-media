@@ -24,7 +24,7 @@ jobs:
     uses: ai-ecoverse/slicc-shared-web/.github/workflows/pipeline.yml@v2.13.7
     secrets: inherit
     with:
-      node-version: '24'
+      node-version: "24"
       test-glob: test/integration/*.test.mjs
       shards: 2
       review-prompt: |
