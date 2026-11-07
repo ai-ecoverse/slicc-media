@@ -45,6 +45,7 @@ before(async () => {
       ['/', 'test/integration/page/'],
     ],
     isolated: true,
+    args: ['--autoplay-policy=no-user-gesture-required'],
     coverage: ['/repo/dist/'],
     timeout: 120000,
   });
@@ -52,13 +53,18 @@ before(async () => {
 
 after(() => chrome?.close());
 
-it('runs media and mediaprobe on WebCodecs in Chromium', async (t) => {
+async function booted(t) {
   const page = await chrome.page(t);
   await page.goto('/');
   await page.until(() => typeof window.boot === 'function');
   assert.equal(await page.evaluate((f) => window.boot(f), files()), true);
   const sh = (script) =>
     page.evaluate((s) => window.kernel.run(['sh', '-c', s], { cwd: '/tmp' }), script);
+  return { page, sh };
+}
+
+it('runs media and mediaprobe on WebCodecs in Chromium', async (t) => {
+  const { sh } = await booted(t);
 
   await t.test('lists the browser encoders, VP8, VP9 and Opus among them', async () => {
     const r = await sh('media -encoders');
@@ -111,4 +117,22 @@ it('runs media and mediaprobe on WebCodecs in Chromium', async (t) => {
       }
     }
   );
+});
+
+it('reads a live MediaRecorder WebM from /dev/embedder as a non-seekable stream', async (t) => {
+  const { sh } = await booted(t);
+  const header = JSON.stringify({ kind: 'capture.screen', type: 'video/webm', duration: 3 });
+  for (const ext of ['mp4', 'webm']) {
+    await t.test(`remuxes it to ${ext}`, async (s) => {
+      const r = await sh(
+        `exec 3<>/dev/embedder && printf '%s\\n' '${header}' >&3 && cat <&3 | media -nostats -y -i - -c copy live.${ext} && mediaprobe -v error -show_format -show_streams -of json live.${ext}`
+      );
+      assert.equal(r.status, 0, r.stderr);
+      const { streams, format } = JSON.parse(r.stdout);
+      assert.deepEqual(streams.map((s) => s.codec_type).sort(), ['audio', 'video']);
+      const seconds = Number(format.duration);
+      assert.ok(Math.abs(seconds - 3) <= 0.3, `duration ${seconds}`);
+      s.diagnostic(`${streams.map((x) => x.codec_name).join('+')}, ${seconds} s`);
+    });
+  }
 });
