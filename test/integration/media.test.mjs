@@ -319,3 +319,88 @@ describe('capture on the Node kernel', () => {
     }
   });
 });
+
+describe('capture through a page hook on the Node kernel', () => {
+  let page;
+  const live = [];
+
+  function liveWebm() {
+    const bytes = new Uint8Array(readFileSync(new URL('./fixtures/clip.webm', import.meta.url)));
+    bytes.set([0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], 0x28);
+    return bytes;
+  }
+
+  before(async () => {
+    page = await boot({
+      requests: {
+        kinds: { 'capture.screen': {} },
+        handle: ({ signal }) =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(liveWebm());
+              live.push(controller);
+              signal.addEventListener('abort', () => controller.close(), { once: true });
+            },
+          }),
+      },
+    });
+  });
+
+  after(() => page?.close());
+
+  async function terminal(script) {
+    let output = '';
+    const term = await page.kernel.openTerminal(['sh', '-c', script], {
+      cwd: '/tmp',
+      onData: (data) => {
+        output += new TextDecoder().decode(data);
+      },
+    });
+    const before = live.length;
+    for (let i = 0; i < 400 && live.length === before; i++) {
+      await new Promise((ok) => setTimeout(ok, 25));
+    }
+    assert.ok(live.length > before, 'the page got the request');
+    await new Promise((ok) => setTimeout(ok, 500));
+    return { term, output: () => output };
+  }
+
+  it('stops on q from a terminal, finalizes the file and puts the terminal back', async () => {
+    const { term, output } = await terminal(
+      'media -y -f avfoundation -i 0 -c copy q.mkv; echo st=$?; stty -a'
+    );
+    term.write('q');
+    await term.exited;
+    assert.match(output(), /st=0\r?\n/);
+    assert.doesNotMatch(output(), /-icanon|-echo /);
+    const r = await page.sh(
+      'mediaprobe -v error -show_entries stream=codec_type -of csv=p=0 q.mkv'
+    );
+    assert.equal(r.stdout, 'video\naudio\n', r.stderr);
+  });
+
+  it('leaves the terminal alone with -nostdin, and stops on ^C', async () => {
+    const { term, output } = await terminal(
+      'media -nostdin -y -f avfoundation -i 0 -c copy n.mkv; echo st=$?'
+    );
+    term.write('q');
+    await new Promise((ok) => setTimeout(ok, 500));
+    assert.doesNotMatch(output(), /st=/);
+    term.write('\x03');
+    await term.exited;
+    assert.match(output(), /Exiting normally, received signal 2\./);
+    assert.match(output(), /st=255\r?\n/);
+    const r = await page.sh(
+      'mediaprobe -v error -show_entries stream=codec_type -of csv=p=0 n.mkv'
+    );
+    assert.equal(r.stdout, 'video\naudio\n', r.stderr);
+  });
+
+  it('finalizes on SIGHUP and exits 255', async () => {
+    const r = await page.sh(
+      'media -nostats -y -f x11grab -i :0 -c copy h.mkv & pid=$!; sleep 1; kill -HUP $pid; wait $pid; echo st=$?; mediaprobe -v error -show_entries stream=codec_type -of csv=p=0 h.mkv'
+    );
+    assert.equal(r.stdout, 'st=255\nvideo\naudio\n', r.stderr);
+    assert.match(r.stderr, /Exiting normally, received signal 1\.\n$/);
+  });
+});
