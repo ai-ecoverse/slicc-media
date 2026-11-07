@@ -8,7 +8,7 @@ function fakeMedia() {
   const canvas = document.createElement('canvas');
   canvas.width = 320;
   canvas.height = 240;
-  const g = canvas.getContext('2d');
+  const g = canvas.getContext('2d', { alpha: false });
   let frame = 0;
   const draw = () => {
     frame += 1;
@@ -92,11 +92,12 @@ async function still(type) {
 
 const requests = {
   kinds: { 'capture.screen': {} },
-  async handle({ options, signal }) {
+  async handle({ options, signal, progress }) {
     window.capture.requests.push(options);
     if (window.capture.refuse) throw new DOMException(window.capture.refuse, 'NotAllowedError');
     const type = options.type ?? 'image/png';
     if (type.startsWith('image/')) return still(type);
+    progress('recording…');
     return recording(options, signal);
   },
 };

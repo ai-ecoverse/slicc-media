@@ -75,6 +75,18 @@ const VALUE_TAKING_FLAGS = new Set([
   '-fps_mode',
   '-avoid_negative_ts',
   '-stats_period',
+  '-vframes',
+  '-update',
+  '-list_devices',
+  '-capture_cursor',
+  '-capture_mouse_clicks',
+  '-draw_mouse',
+  '-framerate',
+  '-video_size',
+  '-pixel_format',
+  '-probesize',
+  '-thread_queue_size',
+  '-rtbufsize',
 ]);
 
 const BOOLEAN_FLAGS = new Set([

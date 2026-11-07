@@ -60,7 +60,18 @@ async function booted(t) {
   assert.equal(await page.evaluate((f) => window.boot(f), files()), true);
   const sh = (script) =>
     page.evaluate((s) => window.kernel.run(['sh', '-c', s], { cwd: '/tmp' }), script);
-  return { page, sh };
+  const header = () => page.evaluate(() => window.capture.requests.at(-1));
+  return { page, sh, header };
+}
+
+const probe = (file) => `mediaprobe -v error -show_format -show_streams -of json ${file}`;
+
+function recorded(stdout, seconds, slack) {
+  const { streams, format } = JSON.parse(stdout);
+  assert.deepEqual(streams.map((s) => s.codec_type).sort(), ['audio', 'video']);
+  const duration = Number(format.duration);
+  assert.ok(Math.abs(duration - seconds) <= slack, `duration ${duration}`);
+  return streams;
 }
 
 it('runs media and mediaprobe on WebCodecs in Chromium', async (t) => {
@@ -135,4 +146,82 @@ it('reads a live MediaRecorder WebM from /dev/embedder as a non-seekable stream'
       s.diagnostic(`${streams.map((x) => x.codec_name).join('+')}, ${seconds} s`);
     });
   }
+});
+
+it('captures the screen through capture.screen with media itself', async (t) => {
+  const { page, sh, header } = await booted(t);
+
+  await t.test('records -t 2 into an mp4, with the cursor, and passes progress on', async () => {
+    const r = await sh(
+      `media -nostats -y -f avfoundation -capture_cursor 1 -framerate 30 -i "Capture screen 0" -t 2 out.mp4 && ${probe('out.mp4')}`
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /^media: recording…\n/);
+    recorded(r.stdout, 2, 0.2);
+    assert.deepEqual(await header(), {
+      type: 'video/webm',
+      surface: 'monitor',
+      cursor: 'always',
+      duration: 2,
+    });
+  });
+
+  await t.test('transcodes a live capture through WebCodecs', async () => {
+    const r = await sh(
+      `media -nostats -y -f x11grab -i :0.0 -t 1.5 -c:v libvpx -vf scale=160:-2 -c:a libopus small.webm && ${probe('small.webm')}`
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const [video] = recorded(r.stdout, 1.5, 0.2);
+    assert.equal(video.codec_name, 'vp8');
+    assert.equal(video.width, 160);
+  });
+
+  await t.test('writes a still as the page encoded it', async () => {
+    const r = await sh(
+      'media -y -f gdigrab -i title=Editor -frames:v 1 shot.png && od -A n -t x1 -N 8 shot.png'
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim(), '89 50 4e 47 0d 0a 1a 0a');
+    assert.deepEqual(await header(), { type: 'image/png', surface: 'window' });
+  });
+
+  await t.test('finalizes the file on ^C when there is no -t, and exits 255', async () => {
+    const r = await sh(
+      `media -nostats -y -f avfoundation -i 0 live.webm & pid=$!; sleep 2; kill -INT $pid; wait $pid; echo status=$?; ${probe('live.webm')}`
+    );
+    assert.match(r.stdout, /^status=255\n/, r.stderr);
+    assert.match(r.stderr, /Exiting normally, received signal 2\.\n$/);
+    recorded(r.stdout.replace(/^status=255\n/, ''), 2, 1);
+    assert.equal((await header()).duration, undefined);
+  });
+
+  await t.test('ends normally when the page ends the capture', async () => {
+    const r = await page.evaluate(
+      async (script) => {
+        const run = window.kernel.run(['sh', '-c', script], { cwd: '/tmp' });
+        while (window.capture.live.size === 0) await new Promise((ok) => setTimeout(ok, 50));
+        await new Promise((ok) => setTimeout(ok, 1500));
+        for (const capture of window.capture.live) capture.end();
+        return run;
+      },
+      `media -nostats -y -f gdigrab -i desktop ended.mkv && ${probe('ended.mkv')}`
+    );
+    assert.equal(r.status, 0, r.stderr);
+    recorded(r.stdout, 1.5, 0.75);
+  });
+
+  await t.test('says what a refusal means and exits 1', async () => {
+    await page.evaluate(() => {
+      window.capture.refuse = 'Permission denied by user';
+    });
+    const r = await sh('media -nostats -y -f avfoundation -i 0 -t 1 refused.mp4');
+    await page.evaluate(() => {
+      window.capture.refuse = null;
+    });
+    assert.equal(r.status, 1);
+    assert.equal(
+      r.stderr,
+      'media: user cancelled, permission denied, or the surface is protected\n'
+    );
+  });
 });

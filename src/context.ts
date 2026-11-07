@@ -28,6 +28,18 @@ export interface Context {
   open(path: string, flags: OpenFlags): Promise<KernelFile>;
   fs: { exists(path: string): Promise<boolean> };
   signals?: { on(signal: string, handler: () => void): unknown };
+  tty?: {
+    getAttr(fd: number): Promise<Termios>;
+    setAttr(fd: number, termios: Termios): Promise<void>;
+  };
+}
+
+export interface Termios {
+  c_iflag: number;
+  c_oflag: number;
+  c_cflag: number;
+  c_lflag: number;
+  c_cc: number[];
 }
 
 export class UsageError extends Error {}
