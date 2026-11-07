@@ -236,3 +236,171 @@ describe('media on the Node kernel', () => {
     );
   });
 });
+
+describe('capture on the Node kernel', () => {
+  it('lists the screen as the only avfoundation device', async () => {
+    assert.deepEqual(await sh('media -f avfoundation -list_devices true -i ""'), {
+      status: 0,
+      stdout: '',
+      stderr:
+        '[AVFoundation indev @ 0x0] AVFoundation video devices:\n[AVFoundation indev @ 0x0] [0] Capture screen 0\n[AVFoundation indev @ 0x0] AVFoundation audio devices:\n',
+    });
+  });
+
+  it('needs the page, and writes nothing without it', async () => {
+    for (const args of [
+      '-f avfoundation -i "Capture screen 0" -t 1 nopage.webm',
+      '-f x11grab -i :0.0 nopage.webm',
+      '-f gdigrab -i desktop -frames:v 1 nopage.png',
+    ]) {
+      const r = await sh(`media -y ${args}; ls nopage.webm nopage.png 2>&1`);
+      assert.match(
+        r.stderr,
+        /^media: capture needs seven's page \(no page answers capture\.screen\)\n/,
+        args
+      );
+      assert.match(r.stdout, /cannot access 'nopage\.webm'/, args);
+    }
+    assert.equal((await sh('media -f avfoundation -i 0 -t 1 nopage.mp4')).status, 1);
+  });
+
+  it('refuses cameras, microphones and options it cannot honour, by name', async () => {
+    for (const [args, message] of [
+      ['-f avfoundation -i 1 x.mp4', '-f avfoundation -i "1": not supported yet'],
+      [
+        '-f avfoundation -i "FaceTime HD Camera" x.mp4',
+        '-f avfoundation -i "FaceTime HD Camera": not supported yet',
+      ],
+      ['-f avfoundation -i "0:0" x.mp4', '-f avfoundation -i "0:0": not supported yet'],
+      ['-f avfoundation -i ":0" x.m4a', '-f avfoundation -i ":0": not supported yet'],
+      ['-f avfoundation -i none x.mp4', '-f avfoundation -i "none": nothing to capture'],
+      ['-f v4l2 -i /dev/video0 x.mp4', '-f v4l2 -i "/dev/video0": not supported yet'],
+      ['-f dshow -i video=Cam x.mp4', '-f dshow -i "video=Cam": not supported yet'],
+      ['-f pulse -i default x.wav', '-f pulse -i "default": not supported yet'],
+      ['-f alsa -i 0 x.wav', '-f alsa -i "0": not supported yet'],
+      [
+        '-f x11grab -i :0.0+100,200 x.mp4',
+        'x11grab offsets (+100,200) are not supported; crop with -vf crop=w:h:x:y',
+      ],
+      [
+        '-f gdigrab -i hwnd=1 x.mp4',
+        "gdigrab input 'hwnd=1' is not supported; use desktop or title=…",
+      ],
+      [
+        '-f x11grab -video_size 1280x720 -i :0 x.mp4',
+        '-video_size is not supported for the screen; scale with -vf scale=W:H',
+      ],
+      [
+        '-f x11grab -draw_mouse 0 -i :0 x.mp4',
+        'input option -draw_mouse is not supported; use -capture_cursor 0 or 1',
+      ],
+      [
+        '-f avfoundation -capture_mouse_clicks 1 -i 0 x.mp4',
+        'input option -capture_mouse_clicks is not supported',
+      ],
+      ['-f x11grab -list_devices true -i ""', '-list_devices is only for -f avfoundation'],
+      [
+        '-f avfoundation -i 0 -vf scale=640:-2 shot.png',
+        '-vf: not with a still; the page writes the image as it is',
+      ],
+      [
+        '-f avfoundation -i 0 -frames:v 1 shot.mp4',
+        'a still needs a .png, .jpg, .jpeg or .webp output',
+      ],
+      [
+        '-f avfoundation -i 0 -frames:v 30 x.mp4',
+        '-frames:v 30: only one frame, a still, can be captured',
+      ],
+      ['-f avfoundation -i 0', 'at least one output file must be specified'],
+    ]) {
+      const r = await sh(`media ${args}`);
+      assert.equal(r.status, 1, args);
+      assert.equal(r.stderr, `media: ${message}\n`, args);
+    }
+  });
+});
+
+describe('capture through a page hook on the Node kernel', () => {
+  let page;
+  const live = [];
+
+  function liveWebm() {
+    const bytes = new Uint8Array(readFileSync(new URL('./fixtures/clip.webm', import.meta.url)));
+    bytes.set([0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], 0x28);
+    return bytes;
+  }
+
+  before(async () => {
+    page = await boot({
+      requests: {
+        kinds: { 'capture.screen': {} },
+        handle: ({ signal }) =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(liveWebm());
+              live.push(controller);
+              signal.addEventListener('abort', () => controller.close(), { once: true });
+            },
+          }),
+      },
+    });
+  });
+
+  after(() => page?.close());
+
+  async function terminal(script) {
+    let output = '';
+    const term = await page.kernel.openTerminal(['sh', '-c', script], {
+      cwd: '/tmp',
+      onData: (data) => {
+        output += new TextDecoder().decode(data);
+      },
+    });
+    const before = live.length;
+    for (let i = 0; i < 400 && live.length === before; i++) {
+      await new Promise((ok) => setTimeout(ok, 25));
+    }
+    assert.ok(live.length > before, 'the page got the request');
+    await new Promise((ok) => setTimeout(ok, 500));
+    return { term, output: () => output };
+  }
+
+  it('stops on q from a terminal, finalizes the file and puts the terminal back', async () => {
+    const { term, output } = await terminal(
+      'media -y -f avfoundation -i 0 -c copy q.mkv; echo st=$?; stty -a'
+    );
+    term.write('q');
+    await term.exited;
+    assert.match(output(), /st=0\r?\n/);
+    assert.doesNotMatch(output(), /-icanon|-echo /);
+    const r = await page.sh(
+      'mediaprobe -v error -show_entries stream=codec_type -of csv=p=0 q.mkv'
+    );
+    assert.equal(r.stdout, 'video\naudio\n', r.stderr);
+  });
+
+  it('leaves the terminal alone with -nostdin, and stops on ^C', async () => {
+    const { term, output } = await terminal(
+      'media -nostdin -y -f avfoundation -i 0 -c copy n.mkv; echo st=$?'
+    );
+    term.write('q');
+    await new Promise((ok) => setTimeout(ok, 500));
+    assert.doesNotMatch(output(), /st=/);
+    term.write('\x03');
+    await term.exited;
+    assert.match(output(), /Exiting normally, received signal 2\./);
+    assert.match(output(), /st=255\r?\n/);
+    const r = await page.sh(
+      'mediaprobe -v error -show_entries stream=codec_type -of csv=p=0 n.mkv'
+    );
+    assert.equal(r.stdout, 'video\naudio\n', r.stderr);
+  });
+
+  it('finalizes on SIGHUP and exits 255', async () => {
+    const r = await page.sh(
+      'media -nostats -y -f x11grab -i :0 -c copy h.mkv & pid=$!; sleep 1; kill -HUP $pid; wait $pid; echo st=$?; mediaprobe -v error -show_entries stream=codec_type -of csv=p=0 h.mkv'
+    );
+    assert.equal(r.stdout, 'st=255\nvideo\naudio\n', r.stderr);
+    assert.match(r.stderr, /Exiting normally, received signal 1\.\n$/);
+  });
+});

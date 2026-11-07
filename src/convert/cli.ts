@@ -7,10 +7,22 @@ import {
   canEncodeVideo,
   type VideoCodec,
 } from 'mediabunny';
+import {
+  type Capture,
+  captureMessage,
+  DEVICE_LIST,
+  type Header,
+  type LiveCapture,
+  live,
+  parseCapture,
+  quitOnQ,
+  readAll,
+  request,
+} from '../capture.ts';
 import { type Context, message, UsageError } from '../context.ts';
-import { openSource, openTarget, STDIN_NAMES, STDOUT_NAMES } from '../io.ts';
+import { type OpenedSource, openSource, openTarget, STDIN_NAMES, STDOUT_NAMES } from '../io.ts';
 import { type Invocation, parseArgs } from './args.ts';
-import { AUDIO_CODECS, CONTAINERS, makePlan } from './plan.ts';
+import { AUDIO_CODECS, CONTAINERS, makePlan, type Plan } from './plan.ts';
 import { ConvertError, convert } from './run.ts';
 
 declare const MEDIA_VERSION: string;
@@ -41,6 +53,12 @@ ignored.
   -af aresample=RATE   resample the audio
   -s WxH, -r FPS, -g N, -ac N, -ar RATE, -metadata key=value, -movflags faststart
   -nostats, -v LEVEL   no progress, or quiet/error to print errors only
+
+  -f avfoundation -i "Capture screen 0"
+                       record the screen through seven's page, until -t, q or
+                       ^C (also -f x11grab, -f gdigrab -i desktop); with
+                       -frames:v 1 and a .png, .jpg or .webp, take a still;
+                       -list_devices true -i "" lists the devices
 
   -version, -encoders, -decoders, -formats, -h
 `;
@@ -151,45 +169,131 @@ function progressReporter(ctx: Context, tty: boolean) {
   return { report, end };
 }
 
-export async function runMedia(ctx: Context, args: string[]): Promise<number> {
-  if (args.length === 0) {
-    await ctx.write(2, `${HELP}\n${NAME}: no input given\n`);
+type Screen = Extract<Capture, { list: false }>;
+
+const exiting = (signal: number): string => `Exiting normally, received signal ${signal}.\n`;
+
+async function runStill(ctx: Context, inv: Invocation, header: Header): Promise<number> {
+  const out = inv.outputPath as string;
+  if (!(await mayOverwrite(ctx, inv, out))) return 1;
+  let signal = 0;
+  let file: Awaited<ReturnType<typeof request>> | undefined;
+  const stop = (n: number) => (): void => {
+    signal = n;
+    void file?.close().catch(() => {});
+  };
+  ctx.signals?.on('SIGINT', stop(2));
+  ctx.signals?.on('SIGTERM', stop(15));
+  ctx.signals?.on('SIGHUP', stop(1));
+  let bytes: Uint8Array;
+  try {
+    file = await request(ctx, header);
+    if (signal) await file.close().catch(() => {});
+    bytes = await readAll(file);
+  } catch (err) {
+    if (signal) return ctx.write(2, exiting(signal)).then(() => 255);
+    await ctx.write(2, `${NAME}: ${captureMessage(err)}\n`);
+    return 1;
+  } finally {
+    await file?.close().catch(() => {});
+  }
+  if (signal) return ctx.write(2, exiting(signal)).then(() => 255);
+  if (bytes.length === 0) return ctx.write(2, `${NAME}: the page sent no image\n`).then(() => 1);
+  try {
+    const target = await ctx.open(ctx.resolve(out), { write: true, create: true, truncate: true });
+    await target.write(0, bytes);
+    await target.close();
+  } catch (err) {
+    await ctx.write(2, `${NAME}: ${out}: ${message(err)}\n`);
     return 1;
   }
-  const shown = await info(ctx, args);
-  if (shown !== null) return shown;
-  let inv: Invocation;
-  let plan: ReturnType<typeof makePlan>;
-  let pipe: boolean;
+  return 0;
+}
+
+function captureInvocation(inv: Invocation, screen: Screen | null): Invocation {
+  if (!screen) return inv;
+  return { ...inv, inputs: [{ path: inv.inputs[0].path, raw: screen.rest }] };
+}
+
+interface Job {
+  inv: Invocation;
+  plan?: Plan;
+  screen: Screen | null;
+}
+
+async function prepare(ctx: Context, args: string[]): Promise<Job | number> {
   try {
-    inv = parseArgs(args);
-    pipe = inv.outputPath !== null && STDOUT_NAMES.has(inv.outputPath);
-    plan = makePlan(inv, pipe && (await ctx.fdStatus(1)).type !== 'file');
+    const inv = parseArgs(args);
+    const capture = parseCapture(inv);
+    if (capture?.list) return ctx.write(2, DEVICE_LIST).then(() => 0);
+    if (capture?.still) return { inv, screen: capture };
+    const pipe = inv.outputPath !== null && STDOUT_NAMES.has(inv.outputPath);
+    const toPipe = pipe && (await ctx.fdStatus(1)).type !== 'file';
+    return { inv, screen: capture, plan: makePlan(captureInvocation(inv, capture), toPipe) };
   } catch (err) {
     if (!(err instanceof UsageError)) throw err;
     await ctx.write(2, `${NAME}: ${err.message}\n`);
     return 1;
   }
-  const quiet = ['quiet', 'panic', 'fatal', 'error', '-8', '0', '8', '16'].includes(inv.loglevel);
-  const inPath = inv.inputs[0].path;
-  const outPath = inv.outputPath as string;
-  if (!(await mayOverwrite(ctx, inv, outPath))) return 1;
-  let source: Awaited<ReturnType<typeof openSource>>;
+}
+
+async function openInput(ctx: Context, job: Job, plan: Plan): Promise<OpenedSource | null> {
+  const { inv, screen } = job;
   try {
-    source = await openSource(ctx, inPath);
+    if (!screen) return await openSource(ctx, inv.inputs[0].path);
+    const end = plan.trim?.end;
+    const header: Header = end === undefined ? screen.header : { ...screen.header, duration: end };
+    return live(await request(ctx, header));
   } catch (err) {
-    await ctx.write(2, `${inPath}: ${message(err)}\n`);
+    const text = screen
+      ? `${NAME}: ${captureMessage(err)}`
+      : `${inv.inputs[0].path}: ${message(err)}`;
+    await ctx.write(2, `${text}\n`);
+    return null;
+  }
+}
+
+async function failed(
+  ctx: Context,
+  err: unknown,
+  capture: LiveCapture | undefined,
+  signal: number
+): Promise<number> {
+  if (capture?.failure() !== undefined) {
+    await ctx.write(2, `${NAME}: ${captureMessage(capture.failure())}\n`);
     return 1;
   }
+  if (capture?.received() === 0) {
+    if (signal) return ctx.write(2, exiting(signal)).then(() => 255);
+    return ctx.write(2, `${NAME}: the page sent no video\n`).then(() => 1);
+  }
+  const text = err instanceof ConvertError ? err.message : message(err);
+  const lines = text.split('\n').map((l) => `${NAME}: ${l}\n`);
+  await ctx.write(2, lines.join(''));
+  return 1;
+}
+
+async function run(ctx: Context, job: Job, plan: Plan): Promise<number> {
+  const { inv, screen } = job;
+  const outPath = inv.outputPath as string;
+  if (!(await mayOverwrite(ctx, inv, outPath))) return 1;
+  const source = await openInput(ctx, job, plan);
+  if (!source) return 1;
+  const capture = screen ? (source as LiveCapture) : undefined;
   let target: Awaited<ReturnType<typeof openTarget>> | undefined;
   let conversion: Conversion | undefined;
   let signal = 0;
   const stop = (n: number) => (): void => {
     signal = n;
-    void conversion?.cancel();
+    if (capture) capture.stop();
+    else void conversion?.cancel();
   };
   ctx.signals?.on('SIGINT', stop(2));
   ctx.signals?.on('SIGTERM', stop(15));
+  if (capture) ctx.signals?.on('SIGHUP', stop(1));
+  const nostdin = [...inv.inputs[0].raw, ...inv.outputOpts].includes('-nostdin');
+  const release = capture && !nostdin ? await quitOnQ(ctx, capture.stop) : async () => {};
+  const quiet = ['quiet', 'panic', 'fatal', 'error', '-8', '0', '8', '16'].includes(inv.loglevel);
   const progress = progressReporter(ctx, (await ctx.fdStatus(2)).tty);
   try {
     target = await openTarget(ctx, outPath, () => void conversion?.cancel());
@@ -197,31 +301,42 @@ export async function runMedia(ctx: Context, args: string[]): Promise<number> {
       plan,
       source: source.source,
       target: target.target,
-      onProgress: quiet || !inv.stats ? undefined : progress.report,
+      onProgress: quiet || !inv.stats || capture ? undefined : progress.report,
       onConversion: (c) => {
         conversion = c;
-        if (signal) void c.cancel();
+        if (signal && !capture) void c.cancel();
       },
-      canceled: () => signal !== 0 || target?.error() !== undefined,
+      canceled: () => (signal !== 0 && !capture) || target?.error() !== undefined,
     });
     await progress.end();
     if (target.error() !== undefined) {
       await ctx.write(2, `${NAME}: ${outPath}: ${message(target.error())}\n`);
       return 1;
     }
-    if (result === 'canceled') {
-      await ctx.write(2, `Exiting normally, received signal ${signal}.\n`);
+    if (result === 'canceled' || signal) {
+      await ctx.write(2, exiting(signal));
       return 255;
     }
     return 0;
   } catch (err) {
     await progress.end();
-    const text = err instanceof ConvertError ? err.message : message(err);
-    const lines = text.split('\n').map((l) => `${NAME}: ${l}\n`);
-    await ctx.write(2, lines.join(''));
-    return 1;
+    return failed(ctx, err, capture, signal);
   } finally {
+    await release();
     await source.close();
     await target?.close();
   }
+}
+
+export async function runMedia(ctx: Context, args: string[]): Promise<number> {
+  if (args.length === 0) {
+    await ctx.write(2, `${HELP}\n${NAME}: no input given\n`);
+    return 1;
+  }
+  const shown = await info(ctx, args);
+  if (shown !== null) return shown;
+  const job = await prepare(ctx, args);
+  if (typeof job === 'number') return job;
+  if (job.screen?.still) return runStill(ctx, job.inv, job.screen.header);
+  return run(ctx, job, job.plan as Plan);
 }

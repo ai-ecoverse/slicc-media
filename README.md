@@ -37,7 +37,7 @@ media -i talk.mp4 -vn -c:a pcm_s16le -ar 16000 -ac 1 talk.wav
 media -i clip.mp4 -c copy -f mpegts - | mediaprobe -
 ```
 
-One input and one output. The options:
+One input and one output; the input can also be [the screen](#capture). The options:
 
 |                   |                                                                                                                                                                                                                                                             |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -56,8 +56,28 @@ One input and one output. The options:
 - **Files** are read and written in place through the kernel's paged files, so neither the input nor the output is held in memory.
 - **Overwrite:** an existing output needs `-y`; on a terminal `media` asks, otherwise it exits 1.
 - **Progress** goes to stderr (`time=00:00:01.20 progress=40%`), one updating line on a terminal, every 10% otherwise; `-nostats` turns it off.
-- **^C** (SIGINT) or SIGTERM cancels: `Exiting normally, received signal 2.` and status 255, as FFmpeg does, but the partial output isn't finalized.
-- **Not supported**, each refused by name: more than one input or output, `-filter_complex` and every filter not listed above, `-map` other than `0`, `-shortest`, `-pix_fmt` other than `yuv420p`, `-f lavfi` test sources, frame or image output, capture devices, two-pass, lossless video.
+- **^C** (SIGINT) or SIGTERM cancels: `Exiting normally, received signal 2.` and status 255, as FFmpeg does, but the partial output isn't finalized (a [capture](#capture) is).
+- **Not supported**, each refused by name: more than one input or output, `-filter_complex` and every filter not listed above, `-map` other than `0`, `-shortest`, `-pix_fmt` other than `yuv420p`, `-f lavfi` test sources, frame or image output from a file, two-pass, lossless video, and the [capture](#capture) devices not listed there.
+
+## Capture
+
+```sh
+media -f avfoundation -list_devices true -i ""
+media -f avfoundation -i "Capture screen 0" -t 10 -c:v libx264 out.mp4
+media -f avfoundation -capture_cursor 1 -i 0 screen.webm
+media -f x11grab -i :0.0 -t 5 -c copy screen.mkv
+media -f gdigrab -i desktop -frames:v 1 shot.png
+```
+
+`media` records the screen by asking seven's page, as a `capture.screen` request on the kernel's [`/dev/embedder`](https://github.com/ai-ecoverse/slicc-kernel#devembedder): the page module of [slicc-capture](https://github.com/ai-ecoverse/slicc-capture), with slicc-bios's prompt and guards in front. The user picks the screen, a window or a tab in Chrome's picker; nothing here can skip it. The page records with `MediaRecorder` (WebM, VP9 or VP8, with Opus when there is audio) and sends a chunk every 250 ms, which `media` reads as it arrives and remuxes, or with `-c:v`, `-vf` or `-r` transcodes, into the output, as for any other input.
+- **Devices:** `-f avfoundation` lists, as on macOS, the cameras and then `Capture screen 0`, and no microphones. There are no cameras yet, so the screen is `-i 0` or `-i "Capture screen 0"` (in any case), and a spec `"V:A"` takes `none` or nothing for `A`. `-list_devices true` prints the list on stderr, in avfoundation's lines, and exits 0.
+- **Aliases:** `-f x11grab -i <anything>` and `-f gdigrab -i desktop` are the screen; `-f gdigrab -i title=<name>` starts the picker at windows, and the user still picks one.
+- **Options:** `-t` (or `-to`) stops the recording after that long and trims to it; `-ss` trims the start. `-capture_cursor 1` asks for the cursor, `0` for none. `-framerate` is accepted, but the browser decides the rate, which varies; `-r` or `-vf fps=` make it constant. `-pixel_format`, `-probesize`, `-thread_queue_size` and `-rtbufsize` are accepted and change nothing. Refused by name: `-video_size` (scale with `-vf scale`), x11grab offsets `+x,y` (crop with `-vf crop`), `-draw_mouse` and `-capture_mouse_clicks`.
+- **Stills:** `-frames:v 1`, `-update 1` or an image output (`.png`, `.jpg`, `.jpeg`, `.webp`) ask the page for one frame in that format, and `media` writes its bytes unchanged. A filter, a codec or a trim on a still is refused by name, as is another frame count.
+- **Stopping:** without `-t`, a recording runs until `q` on a terminal's stdin (not with `-nostdin`), ^C, `SIGTERM` or `SIGHUP`, or until the user clicks Chrome's **Stop sharing**. Each of them closes the request and finalizes the output, so the file plays; the last quarter second may be lost. After a signal `media` prints `Exiting normally, received signal N.` and exits 255; after `q` or Stop sharing it exits 0.
+- **Progress:** a capture has no known length, so there is no `time=` line. The page's own lines reach stderr as `media: <line>`, such as `media: recording…`.
+- **Errors**, each with exit 1: `media: user cancelled, permission denied, or the surface is protected` for a refused prompt, a closed picker or a protected surface; `media: capture needs seven's page (no page answers capture.screen)` in the kernel's Node entry, or in a shell whose page doesn't answer it; any other error from the page as `media: <message>`.
+- **Not supported yet:** cameras and microphones, so `-f avfoundation -i 1` (a camera), an audio part (`"0:0"`, `":0"`), `-f v4l2`, `-f dshow`, `-f pulse` and `-f alsa` are each refused as `media: -f <format> -i "<spec>": not supported yet`.
 
 ## Licences
 
