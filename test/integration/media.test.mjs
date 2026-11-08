@@ -436,7 +436,15 @@ describe('capture through a page hook on the Node kernel', () => {
 
 describe('the microphone through a page hook on the Node kernel', () => {
   let page;
-  const mic = { refuse: null, fail: false, empty: false, requests: [], live: [], bytes: null };
+  const mic = {
+    refuse: null,
+    hidden: null,
+    fail: false,
+    empty: false,
+    requests: [],
+    live: [],
+    bytes: null,
+  };
 
   function recording(options, signal) {
     return new ReadableStream({
@@ -475,6 +483,7 @@ describe('the microphone through a page hook on the Node kernel', () => {
         handle: async ({ kind, options, signal }) => {
           mic.requests.push({ kind, ...options });
           if (kind === 'capture.screen') return brokenScreen();
+          if (options.devices && mic.hidden) throw new DOMException(mic.hidden, 'NotAllowedError');
           if (options.devices) return 'default\tDefault - Built-in\nusb-1\tUSB Mic\nanon\t\n';
           if (mic.refuse) throw new DOMException(mic.refuse, 'NotAllowedError');
           return recording(options, signal);
@@ -509,6 +518,17 @@ describe('the microphone through a page hook on the Node kernel', () => {
       ]
         .map((line) => `[AVFoundation indev @ 0x0] ${line}\n`)
         .join('')
+    );
+  });
+
+  it('lists the screen and says why when the page refuses the microphones', async () => {
+    mic.hidden = 'capture: denied by the approval judge: no';
+    const r = await page.sh('media -f avfoundation -list_devices true -i ""');
+    mic.hidden = null;
+    assert.equal(r.status, 1);
+    assert.equal(
+      r.stderr,
+      '[AVFoundation indev @ 0x0] AVFoundation video devices:\n[AVFoundation indev @ 0x0] [0] Capture screen 0\n[AVFoundation indev @ 0x0] AVFoundation audio devices:\nmedia: capture: denied by the approval judge: no\n'
     );
   });
 
