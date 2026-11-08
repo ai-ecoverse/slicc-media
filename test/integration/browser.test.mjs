@@ -225,3 +225,153 @@ it('captures the screen through capture.screen with media itself', async (t) => 
     );
   });
 });
+
+it('records the microphone through audio.record without the gate', async (t) => {
+  const { page, sh } = await booted(t);
+  const asked = () => page.evaluate(() => window.capture.audio.at(-1));
+  const audio = (file) => `mediaprobe -v error -show_format -show_streams -of json ${file}`;
+  const heard = (stdout, seconds, slack) => {
+    const { streams, format } = JSON.parse(stdout);
+    assert.deepEqual(
+      streams.map((s) => s.codec_type),
+      ['audio']
+    );
+    const duration = Number(format.duration);
+    assert.ok(
+      duration > seconds - slack - 0.6 && duration <= seconds + slack,
+      `duration ${duration}`
+    );
+    return streams[0];
+  };
+
+  await t.test('lists the page microphones after the screen', async () => {
+    const r = await sh('media -f avfoundation -list_devices true -i ""');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /\[0\] Default - Fake Microphone\n.*\[1\] Second Fake\n$/);
+  });
+
+  await t.test('records ":0" -t 2 into a wav', async () => {
+    const r = await sh(
+      `media -nostats -y -f avfoundation -i ":0" -t 2 out.wav && ${audio('out.wav')}`
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(heard(r.stdout, 2, 0.1).codec_name, 'pcm_s16le');
+    assert.deepEqual(await asked(), { gate: false, device: 'default', seconds: 2 });
+  });
+
+  await t.test('resamples and downmixes with -ar and -ac', async () => {
+    const r = await sh(
+      `media -nostats -y -f pulse -i "second fake" -t 1 -ar 16000 -ac 1 small.wav && ${audio('small.wav')}`
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const stream = heard(r.stdout, 1, 0.1);
+    assert.equal(stream.sample_rate, '16000');
+    assert.equal(stream.channels, 1);
+    assert.deepEqual(await asked(), { gate: false, device: 'fake-2', seconds: 1 });
+  });
+
+  await t.test('copies the Opus into webm, and re-encodes it into ogg', async () => {
+    for (const [out, codec] of [
+      ['-c:a copy copy.webm', 'opus'],
+      ['-c:a libopus -b:a 64k mic.ogg', 'opus'],
+    ]) {
+      const file = out.split(' ').at(-1);
+      const r = await sh(`media -nostats -y -f alsa -i default -t 1.5 ${out} && ${audio(file)}`);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(heard(r.stdout, 1.5, 0.1).codec_name, codec);
+    }
+    assert.deepEqual(await asked(), { gate: false, seconds: 1.5 });
+  });
+
+  await t.test('encodes AAC into m4a if this browser can, and says why not if not', async (s) => {
+    const encoders = await sh('media -encoders');
+    const r = await sh(
+      `media -nostats -y -f avfoundation -i ":0" -t 1 -c:a aac talk.m4a && ${audio('talk.m4a')}`
+    );
+    if (/ A aac /.test(encoders.stdout)) {
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(heard(r.stdout, 1, 0.1).codec_name, 'aac');
+      s.diagnostic('this browser encodes AAC');
+    } else {
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /no encoder for/);
+    }
+  });
+
+  await t.test('writes a silent recording too', async () => {
+    await page.evaluate(() => {
+      window.capture.silent = true;
+    });
+    const r = await sh(
+      `media -nostats -y -f avfoundation -i ":0" -t 1 silent.wav && ${audio('silent.wav')}`
+    );
+    await page.evaluate(() => {
+      window.capture.silent = false;
+    });
+    assert.equal(r.status, 0, r.stderr);
+    heard(r.stdout, 1, 0.1);
+  });
+
+  await t.test('finalizes on ^C and exits 255', async () => {
+    const r = await sh(
+      `media -nostats -y -f avfoundation -i ":0" live.ogg & pid=$!; sleep 2; kill -INT $pid; wait $pid; echo status=$?; ${audio('live.ogg')}`
+    );
+    assert.match(r.stdout, /^status=255\n/, r.stderr);
+    assert.match(r.stderr, /Exiting normally, received signal 2\.\n$/);
+    heard(r.stdout.replace(/^status=255\n/, ''), 2, 1);
+    assert.equal((await asked()).seconds, undefined);
+  });
+
+  await t.test('stops on q from a terminal and exits 0', async () => {
+    const out = await page.evaluate(async () => {
+      let text = '';
+      const term = await window.kernel.openTerminal(
+        ['sh', '-c', 'media -y -f avfoundation -i ":0" q.webm; echo st=$?'],
+        {
+          cwd: '/tmp',
+          onData: (data) => {
+            text += new TextDecoder().decode(data);
+          },
+        }
+      );
+      while (window.capture.live.size === 0) await new Promise((ok) => setTimeout(ok, 50));
+      await new Promise((ok) => setTimeout(ok, 1500));
+      term.write('q');
+      await term.exited;
+      return text;
+    });
+    assert.match(out, /st=0\r?\n/);
+    const r = await sh(audio('q.webm'));
+    assert.equal(r.status, 0, r.stderr);
+    heard(r.stdout, 1.5, 0.75);
+  });
+
+  await t.test('ends normally when the page ends the recording', async () => {
+    const r = await page.evaluate(
+      async (script) => {
+        const run = window.kernel.run(['sh', '-c', script], { cwd: '/tmp' });
+        while (window.capture.live.size === 0) await new Promise((ok) => setTimeout(ok, 50));
+        await new Promise((ok) => setTimeout(ok, 1500));
+        for (const capture of window.capture.live) capture.end();
+        return run;
+      },
+      `media -nostats -y -f pulse -i default ended.wav && ${audio('ended.wav')}`
+    );
+    assert.equal(r.status, 0, r.stderr);
+    heard(r.stdout, 1.5, 0.75);
+  });
+
+  await t.test('passes a refusal on and leaves no file', async () => {
+    await page.evaluate(() => {
+      window.capture.refuse = "microphone capture is off in seven's settings";
+    });
+    const r = await sh(
+      'media -nostats -y -f avfoundation -i ":0" -t 1 refused.wav; echo st=$?; ls refused.wav 2>&1'
+    );
+    await page.evaluate(() => {
+      window.capture.refuse = null;
+    });
+    assert.equal(r.stderr, "media: microphone capture is off in seven's settings\n");
+    assert.match(r.stdout, /^st=1\n.*cannot access 'refused\.wav'/);
+  });
+});

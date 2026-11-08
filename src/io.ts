@@ -21,6 +21,7 @@ export interface OpenedSource {
 export interface OpenedTarget {
   target: Target;
   error(): unknown;
+  opened(): boolean;
   close(): Promise<void>;
 }
 
@@ -78,16 +79,26 @@ function guarded<T>(write: (chunk: T) => Promise<unknown>, onError: () => void) 
   return { writable, error: () => failure };
 }
 
-function positional(file: KernelFile, onError: () => void): OpenedTarget {
-  const { writable, error } = guarded<StreamTargetChunk>(
-    (chunk) => file.write(chunk.position, chunk.data),
-    onError
-  );
+function positional(
+  open: () => Promise<KernelFile>,
+  onError: () => void,
+  named: boolean
+): OpenedTarget {
+  let opening: Promise<KernelFile> | undefined;
+  let file: KernelFile | undefined;
+  const { writable, error } = guarded<StreamTargetChunk>(async (chunk) => {
+    opening ??= open().then((opened) => {
+      file = opened;
+      return opened;
+    });
+    await (await opening).write(chunk.position, chunk.data);
+  }, onError);
   return {
     target: new StreamTarget(writable),
     error,
+    opened: () => named && file !== undefined,
     close: async () => {
-      await file.close();
+      await file?.close();
     },
   };
 }
@@ -100,11 +111,17 @@ export async function openTarget(
   if (STDOUT_NAMES.has(name)) {
     const status = await ctx.fdStatus(1);
     if (status.type === 'file') {
-      return positional(await ctx.open('/dev/stdout', { write: true }), onError);
+      const file = await ctx.open('/dev/stdout', { write: true });
+      return positional(async () => file, onError, false);
     }
     const { writable, error } = guarded<Uint8Array>((chunk) => ctx.write(1, chunk), onError);
-    return { target: new AppendOnlyStreamTarget(writable), error, close: async () => {} };
+    return {
+      target: new AppendOnlyStreamTarget(writable),
+      error,
+      opened: () => false,
+      close: async () => {},
+    };
   }
   const flags = { write: true, create: true, truncate: true };
-  return positional(await ctx.open(ctx.resolve(name), flags), onError);
+  return positional(() => ctx.open(ctx.resolve(name), flags), onError, true);
 }

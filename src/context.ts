@@ -26,7 +26,7 @@ export interface Context {
   write(fd: number, data: Uint8Array | string): Promise<unknown>;
   fdStatus(fd: number): Promise<FdStatus>;
   open(path: string, flags: OpenFlags): Promise<KernelFile>;
-  fs: { exists(path: string): Promise<boolean> };
+  fs: { exists(path: string): Promise<boolean>; unlink(path: string): Promise<unknown> };
   signals?: { on(signal: string, handler: () => void): unknown };
   tty?: {
     getAttr(fd: number): Promise<Termios>;

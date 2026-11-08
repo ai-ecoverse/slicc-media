@@ -2,7 +2,7 @@ import { attachKernel, createKernel } from '/kernel/index.js';
 
 const live = new Set();
 
-window.capture = { refuse: null, requests: [], live };
+window.capture = { refuse: null, requests: [], live, audio: [], silent: false };
 
 function fakeMedia() {
   const canvas = document.createElement('canvas');
@@ -81,6 +81,67 @@ function recording(options, signal) {
   });
 }
 
+async function fakeMicrophone() {
+  const audio = new AudioContext();
+  const sink = audio.createMediaStreamDestination();
+  const tone = audio.createOscillator();
+  const volume = audio.createGain();
+  volume.gain.value = window.capture.silent ? 0 : 1;
+  tone.connect(volume).connect(sink);
+  tone.start();
+  await audio.resume();
+  while (audio.currentTime === 0) await new Promise((ok) => setTimeout(ok, 10));
+  const stop = () => {
+    for (const track of sink.stream.getTracks()) track.stop();
+    tone.stop();
+    void audio.close();
+  };
+  return { stream: sink.stream, stop };
+}
+
+async function microphone(options, signal) {
+  const media = await fakeMicrophone();
+  const recorder = new MediaRecorder(media.stream, { mimeType: 'audio/webm;codecs=opus' });
+  let chain = Promise.resolve();
+  let done = false;
+  let timer;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    live.delete(handle);
+    if (recorder.state !== 'inactive') recorder.stop();
+    else media.stop();
+  };
+  const handle = { end: finish };
+  return new ReadableStream({
+    start(controller) {
+      recorder.ondataavailable = (event) => {
+        chain = chain.then(async () => {
+          if (event.data.size === 0) return;
+          const bytes = new Uint8Array(await event.data.arrayBuffer());
+          try {
+            controller.enqueue(bytes);
+          } catch {}
+        });
+      };
+      recorder.onstop = () => {
+        media.stop();
+        chain = chain.then(() => {
+          try {
+            controller.close();
+          } catch {}
+        });
+      };
+      signal.addEventListener('abort', finish, { once: true });
+      recorder.start(250);
+      live.add(handle);
+      if (options.seconds !== undefined) timer = setTimeout(finish, options.seconds * 1000);
+    },
+    cancel: finish,
+  });
+}
+
 async function still(type) {
   const canvas = new OffscreenCanvas(320, 240);
   const g = canvas.getContext('2d');
@@ -91,8 +152,16 @@ async function still(type) {
 }
 
 const requests = {
-  kinds: { 'capture.screen': {} },
-  async handle({ options, signal, progress }) {
+  kinds: { 'capture.screen': {}, 'audio.record': {} },
+  async handle({ kind, options, signal, progress }) {
+    if (kind === 'audio.record') {
+      if (options.devices) return 'default\tDefault - Fake Microphone\nfake-2\tSecond Fake\n';
+      window.capture.audio.push(options);
+      if (window.capture.refuse) throw new DOMException(window.capture.refuse, 'NotAllowedError');
+      if (options.gate !== false)
+        throw new DOMException('this hook records ungated only', 'NotSupportedError');
+      return microphone(options, signal);
+    }
     window.capture.requests.push(options);
     if (window.capture.refuse) throw new DOMException(window.capture.refuse, 'NotAllowedError');
     const type = options.type ?? 'image/png';
