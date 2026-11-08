@@ -281,22 +281,73 @@ describe('capture on the Node kernel', () => {
     }
   });
 
-  it('refuses cameras, microphones and options it cannot honour, by name', async () => {
+  it('needs the page for a camera, and writes nothing without it', async () => {
+    for (const args of [
+      '-f avfoundation -i default -t 1 nopage.webm',
+      '-f avfoundation -i 1 -frames:v 1 nopage.png',
+      '-f avfoundation -i "FaceTime HD Camera:0" nopage.webm',
+      '-f v4l2 -i /dev/video0 nopage.webm',
+      '-f dshow -i video="Cam":audio="Mic" nopage.webm',
+    ]) {
+      const r = await sh(`media -y ${args}; echo st=$?; ls nopage.webm nopage.png 2>&1`);
+      assert.equal(
+        r.stderr,
+        "media: capture needs seven's page (no page answers capture.camera)\n",
+        args
+      );
+      assert.match(r.stdout, /^st=1\n.*cannot access 'nopage\.webm'/, args);
+    }
+  });
+
+  it('refuses microphones and options it cannot honour, by name', async () => {
     for (const [args, message] of [
-      ['-f avfoundation -i 1 x.mp4', '-f avfoundation -i "1": not supported yet'],
-      [
-        '-f avfoundation -i "FaceTime HD Camera" x.mp4',
-        '-f avfoundation -i "FaceTime HD Camera": not supported yet',
-      ],
-      ['-f avfoundation -i "0:0" x.mp4', '-f avfoundation -i "0:0": not supported yet'],
-      ['-f avfoundation -i "1:Mic" x.mp4', '-f avfoundation -i "1:Mic": not supported yet'],
       ['-f avfoundation -i none x.mp4', '-f avfoundation -i "none": nothing to capture'],
       [
         '-f avfoundation -i "none:none" x.wav',
         '-f avfoundation -i "none:none": nothing to capture',
       ],
-      ['-f v4l2 -i /dev/video0 x.mp4', '-f v4l2 -i "/dev/video0": not supported yet'],
-      ['-f dshow -i video=Cam x.mp4', '-f dshow -i "video=Cam": not supported yet'],
+      ['-f v4l2 -i /dev/sda x.mp4', "v4l2 input '/dev/sda' is not supported; use /dev/videoN"],
+      [
+        '-f dshow -i Cam x.mp4',
+        'dshow input \'Cam\' is not supported; use video="NAME", audio="NAME" or both',
+      ],
+      ['-f dshow -i video= x.mp4', '-f dshow -i "video=": nothing to capture'],
+      [
+        '-f avfoundation -video_size big -i default x.mp4',
+        "-video_size 'big' is not a size; use WxH",
+      ],
+      [
+        '-f v4l2 -capture_cursor 1 -i /dev/video0 x.mp4',
+        'input option -capture_cursor is not for a camera',
+      ],
+      [
+        '-f avfoundation -capture_cursor 1 -i "FaceTime HD Camera" x.mp4',
+        'input option -capture_cursor is not for a camera',
+      ],
+      [
+        '-f avfoundation -i "default:0" -frames:v 1 x.png',
+        '-f avfoundation -i "default:0": a still has no audio',
+      ],
+      [
+        '-f v4l2 -i /dev/video0 -vf scale=320:-2 x.jpg',
+        '-vf: not with a still; the page writes the image as it is',
+      ],
+      [
+        '-f dshow -i "video=Cam" -c:v libx264 x.webp',
+        '-c:v: not with a still; the page writes the image as it is',
+      ],
+      [
+        '-f avfoundation -t 1 -i default x.png',
+        '-t: not with a still; the page writes the image as it is',
+      ],
+      [
+        '-f avfoundation -ss 1 -i "Capture screen 0" x.png',
+        '-ss: not with a still; the page writes the image as it is',
+      ],
+      [
+        '-f avfoundation -video_size 640x480 -i "capture screen 0" x.mp4',
+        '-video_size is not supported for the screen; scale with -vf scale=W:H',
+      ],
       ['-f pulse -list_devices true -i ""', '-list_devices is only for -f avfoundation'],
       [
         '-f avfoundation -framerate 30 -i ":0" x.wav',
@@ -617,5 +668,221 @@ describe('the microphone through a page hook on the Node kernel', () => {
     mic.live.at(-1).close();
     const e = await ending;
     assert.equal(e.stdout, 'st=0\naudio,opus\n', e.stderr);
+  });
+});
+
+describe('the camera through a page hook on the Node kernel', () => {
+  let page;
+  const cam = { refuse: null, hidden: null, requests: [], live: [] };
+  const PHOTO = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+
+  function liveWebm() {
+    const bytes = new Uint8Array(readFileSync(new URL('./fixtures/clip.webm', import.meta.url)));
+    bytes.set([0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], 0x28);
+    return bytes;
+  }
+
+  function recording(options, signal) {
+    return new ReadableStream({
+      start(controller) {
+        controller.enqueue(liveWebm());
+        cam.live.push(controller);
+        const end = () => {
+          try {
+            controller.close();
+          } catch {}
+        };
+        if (options.duration !== undefined) setTimeout(end, options.duration * 1000);
+        signal.addEventListener('abort', end, { once: true });
+      },
+    });
+  }
+
+  before(async () => {
+    page = await boot({
+      requests: {
+        kinds: {
+          'capture.devices': {},
+          'capture.camera': {},
+          'capture.screen': {},
+          'audio.record': {},
+        },
+        handle: async ({ kind, options, signal }) => {
+          if (kind === 'capture.devices') {
+            if (cam.hidden) throw new DOMException(cam.hidden, 'NotAllowedError');
+            return 'video\tcam-1\tFaceTime HD Camera\nvideo\tcam-2\t\naudio\tmic-1\tBuilt-in Microphone\naudio\tmic-2\tUSB Mic\nother\tx\ty\n';
+          }
+          cam.requests.push({ kind, ...options });
+          if (cam.refuse) throw new DOMException(cam.refuse, 'NotAllowedError');
+          if (options.type?.startsWith('image/')) return PHOTO;
+          return recording(options, signal);
+        },
+      },
+    });
+  });
+
+  after(() => page?.close());
+
+  const last = () => cam.requests.at(-1);
+  const streams = (file) =>
+    `mediaprobe -v error -show_entries stream=codec_type -of csv=p=0 ${file}`;
+
+  it('lists the cameras, then the screen, then the microphones', async () => {
+    const r = await page.sh('media -f avfoundation -list_devices true -i ""');
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(
+      r.stderr,
+      [
+        'AVFoundation video devices:',
+        '[0] FaceTime HD Camera',
+        '[1] Camera 1',
+        '[2] Capture screen 0',
+        'AVFoundation audio devices:',
+        '[0] Built-in Microphone',
+        '[1] USB Mic',
+      ]
+        .map((line) => `[AVFoundation indev @ 0x0] ${line}\n`)
+        .join('')
+    );
+  });
+
+  it('lists the screen and says why when the page refuses the list', async () => {
+    cam.hidden = "camera capture is off in seven's settings";
+    const r = await page.sh('media -f avfoundation -list_devices true -i ""');
+    cam.hidden = null;
+    assert.equal(r.status, 1);
+    assert.match(
+      r.stderr,
+      /\[0\] Capture screen 0\n.*AVFoundation audio devices:\nmedia: camera capture is off in seven's settings\n$/
+    );
+  });
+
+  it('takes a still with the camera named by index, label, v4l2 path or dshow name', async () => {
+    for (const [args, header] of [
+      ['-f avfoundation -i 0 -frames:v 1 a.png', { type: 'image/png', device: 'cam-1' }],
+      ['-f avfoundation -i "camera 1" b.png', { type: 'image/png', device: 'cam-2' }],
+      ['-f avfoundation -i default -update 1 c.png', { type: 'image/png' }],
+      ['-f v4l2 -i /dev/video1 d.jpg', { type: 'image/jpeg', quality: 0.92, device: 'cam-2' }],
+      [
+        '-f dshow -i "video=FaceTime HD Camera" e.webp',
+        { type: 'image/webp', quality: 0.92, device: 'cam-1' },
+      ],
+      ['-f avfoundation -ss 0.5 -i 0 f.png', { type: 'image/png', device: 'cam-1', warmup: 0.5 }],
+    ]) {
+      const out = args.split(' ').at(-1);
+      const r = await page.sh(`media -y ${args} && od -A n -t x1 ${out}`);
+      assert.equal(r.status, 0, `${args}: ${r.stderr}`);
+      assert.equal(r.stdout.trim(), '89 50 4e 47 0d 0a 1a 0a 01 02 03', args);
+      assert.deepEqual(last(), { kind: 'capture.camera', ...header }, args);
+    }
+  });
+
+  it('asks for -video_size and -framerate, exactly when both are given', async () => {
+    for (const [args, header] of [
+      ['-video_size 1280x720', { width: 1280, height: 720 }],
+      ['-framerate 15', { frameRate: 15 }],
+      [
+        '-framerate 30 -video_size 640x480',
+        { width: 640, height: 480, frameRate: 30, exact: true },
+      ],
+    ]) {
+      const r = await page.sh(`media -y -f avfoundation ${args} -i 0 s.png`);
+      assert.equal(r.status, 0, `${args}: ${r.stderr}`);
+      assert.deepEqual(
+        last(),
+        { kind: 'capture.camera', type: 'image/png', device: 'cam-1', ...header },
+        args
+      );
+    }
+  });
+
+  it('records the camera, with a microphone when one is named', async () => {
+    for (const [args, header] of [
+      ['-f avfoundation -i 0', {}],
+      ['-f avfoundation -i "0:1"', { microphone: 'mic-2' }],
+      ['-f avfoundation -i "facetime hd camera:default"', { microphone: true }],
+      [
+        '-f dshow -i video="Camera 1":audio="Built-in Microphone"',
+        { device: 'cam-2', microphone: 'mic-1' },
+      ],
+    ]) {
+      const r = await page.sh(`media -y ${args} -t 1 -c copy v.mkv && ${streams('v.mkv')}`);
+      assert.equal(r.status, 0, `${args}: ${r.stderr}`);
+      assert.equal(r.stdout, 'video\naudio\n', args);
+      assert.deepEqual(
+        last(),
+        { kind: 'capture.camera', type: 'video/webm', device: 'cam-1', ...header, duration: 1 },
+        args
+      );
+    }
+  });
+
+  it('counts the screen after the cameras, with a microphone too', async () => {
+    for (const [args, header] of [
+      ['-f avfoundation -capture_cursor 1 -i 2', { cursor: 'always' }],
+      ['-f avfoundation -i "Capture screen 0:usb mic"', { microphone: 'mic-2' }],
+    ]) {
+      const r = await page.sh(`media -y ${args} -t 1 -c copy w.mkv`);
+      assert.equal(r.status, 0, `${args}: ${r.stderr}`);
+      assert.deepEqual(
+        last(),
+        { kind: 'capture.screen', type: 'video/webm', surface: 'monitor', ...header, duration: 1 },
+        args
+      );
+    }
+  });
+
+  it('refuses a camera the page does not list, and options for what it resolved to', async () => {
+    for (const [args, message] of [
+      ['-f avfoundation -i 3 x.mkv', 'no such camera: 3'],
+      ['-f avfoundation -i "Nope" x.png', 'no such camera: Nope'],
+      ['-f v4l2 -i /dev/video2 x.mkv', 'no such camera: /dev/video2'],
+      ['-f avfoundation -i "0:7" x.mkv', 'no such audio device: 7'],
+      [
+        '-f avfoundation -capture_cursor 1 -i 1 x.mkv',
+        'input option -capture_cursor is not for a camera',
+      ],
+      [
+        '-f avfoundation -video_size 640x480 -i 2 x.mkv',
+        '-video_size is not supported for the screen; scale with -vf scale=W:H',
+      ],
+      [
+        '-f avfoundation -ss 1 -i 2 x.png',
+        '-ss: not with a still; the page writes the image as it is',
+      ],
+    ]) {
+      const before = cam.requests.length;
+      const r = await page.sh(`media -y ${args}; echo st=$?; ls x.mkv x.png 2>&1`);
+      assert.equal(r.stderr, `media: ${message}\n`, args);
+      assert.match(r.stdout, /^st=1\n.*cannot access 'x\.mkv'.*cannot access 'x\.png'/s, args);
+      assert.equal(cam.requests.length, before, args);
+    }
+  });
+
+  it('passes the page refusal on and writes nothing', async () => {
+    cam.refuse = 'camera permission is blocked for this site';
+    const r = await page.sh(
+      'media -y -f avfoundation -i 0 -t 1 r.mkv; echo st=$?; media -y -f avfoundation -i 0 r.png; echo st=$?; ls r.mkv r.png 2>&1'
+    );
+    cam.refuse = null;
+    assert.equal(r.stderr, 'media: camera permission is blocked for this site\n'.repeat(2));
+    assert.match(r.stdout, /^st=1\nst=1\n.*cannot access 'r\.mkv'.*cannot access 'r\.png'/s);
+  });
+
+  it('finalizes on SIGINT and exits 255, and exits 0 when the page ends', async () => {
+    const r = await page.sh(
+      `media -nostats -y -f v4l2 -i /dev/video0 -c copy int.mkv & pid=$!; sleep 1; kill -INT $pid; wait $pid; echo st=$?; ${streams('int.mkv')}`
+    );
+    assert.equal(r.stdout, 'st=255\nvideo\naudio\n', r.stderr);
+    assert.match(r.stderr, /Exiting normally, received signal 2\.\n$/);
+    const before = cam.live.length;
+    const ending = page.sh(
+      `media -nostats -y -f avfoundation -i 0 -c copy end.mkv; echo st=$?; ${streams('end.mkv')}`
+    );
+    while (cam.live.length === before) await new Promise((ok) => setTimeout(ok, 25));
+    await new Promise((ok) => setTimeout(ok, 500));
+    cam.live.at(-1).close();
+    const e = await ending;
+    assert.equal(e.stdout, 'st=0\nvideo\naudio\n', e.stderr);
   });
 });

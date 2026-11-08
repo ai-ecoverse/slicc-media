@@ -187,7 +187,7 @@ it('captures the screen through capture.screen with media itself', async (t) => 
 
   await t.test('finalizes the file on ^C when there is no -t, and exits 255', async () => {
     const r = await sh(
-      `media -nostats -y -f avfoundation -i 0 live.webm & pid=$!; sleep 2; kill -INT $pid; wait $pid; echo status=$?; ${probe('live.webm')}`
+      `media -nostats -y -f avfoundation -i 1 live.webm & pid=$!; sleep 2; kill -INT $pid; wait $pid; echo status=$?; ${probe('live.webm')}`
     );
     assert.match(r.stdout, /^status=255\n/, r.stderr);
     assert.match(r.stderr, /Exiting normally, received signal 2\.\n$/);
@@ -214,7 +214,7 @@ it('captures the screen through capture.screen with media itself', async (t) => 
     await page.evaluate(() => {
       window.capture.refuse = 'Permission denied by user';
     });
-    const r = await sh('media -nostats -y -f avfoundation -i 0 -t 1 refused.mp4');
+    const r = await sh('media -nostats -y -f avfoundation -i 1 -t 1 refused.mp4');
     await page.evaluate(() => {
       window.capture.refuse = null;
     });
@@ -373,5 +373,144 @@ it('records the microphone through audio.record without the gate', async (t) => 
     });
     assert.equal(r.stderr, "media: microphone capture is off in seven's settings\n");
     assert.match(r.stdout, /^st=1\n.*cannot access 'refused\.wav'/);
+  });
+});
+
+it('records a camera through capture.camera', async (t) => {
+  const { page, sh } = await booted(t);
+  const asked = () => page.evaluate(() => window.capture.camera.at(-1));
+  const filmed = (stdout, seconds, kinds) => {
+    const { streams, format } = JSON.parse(stdout);
+    assert.deepEqual(streams.map((s) => s.codec_type).sort(), kinds);
+    const duration = Number(format.duration);
+    assert.ok(Math.abs(duration - seconds) <= 0.3, `duration ${duration}`);
+    return streams;
+  };
+
+  await t.test('lists the camera, then the screen after it', async () => {
+    const r = await sh('media -f avfoundation -list_devices true -i ""');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /video devices:\n.*\[0\] Fake Camera\n.*\[1\] Capture screen 0\n/);
+  });
+
+  await t.test('takes a png and a jpg still as the page encoded them', async () => {
+    for (const [args, magic, header] of [
+      ['-f avfoundation -i 0 -frames:v 1 cam.png', '89 50 4e 47', { type: 'image/png' }],
+      [
+        '-f v4l2 -ss 0.2 -i /dev/video0 cam.jpg',
+        'ff d8 ff',
+        { type: 'image/jpeg', quality: 0.92, warmup: 0.2 },
+      ],
+    ]) {
+      const out = args.split(' ').at(-1);
+      const r = await sh(`media -y ${args} && od -A n -t x1 -N 4 ${out}`);
+      assert.equal(r.status, 0, `${args}: ${r.stderr}`);
+      assert.ok(r.stdout.trim().startsWith(magic), `${args}: ${r.stdout}`);
+      assert.deepEqual(await asked(), { device: 'cam-1', ...header });
+    }
+  });
+
+  await t.test('records 2 s into mp4 and webm, with and without the microphone', async () => {
+    for (const [spec, out, kinds, microphone] of [
+      ['0', 'cam.mp4', ['video'], undefined],
+      ['0', 'cam.webm', ['video'], undefined],
+      ['0:0', 'both.mp4', ['audio', 'video'], 'default'],
+      ['Fake Camera:second fake', 'both.webm', ['audio', 'video'], 'fake-2'],
+    ]) {
+      const r = await sh(
+        `media -nostats -y -f avfoundation -i "${spec}" -t 2 ${out} && ${probe(out)}`
+      );
+      assert.equal(r.status, 0, `${spec} ${out}: ${r.stderr}`);
+      filmed(r.stdout, 2, kinds);
+      const header = { type: 'video/webm', device: 'cam-1', duration: 2 };
+      assert.deepEqual(await asked(), microphone ? { ...header, microphone } : header);
+    }
+  });
+
+  await t.test('passes -video_size and -framerate on, exactly when both are given', async () => {
+    const r = await sh(
+      `media -nostats -y -f avfoundation -video_size 320x240 -framerate 30 -i 0 -t 1 -vf scale=160:-2 -c:v libvpx small.webm && ${probe('small.webm')}`
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const [video] = filmed(r.stdout, 1, ['video']);
+    assert.equal(video.codec_name, 'vp8');
+    assert.equal(video.width, 160);
+    assert.deepEqual(await asked(), {
+      type: 'video/webm',
+      device: 'cam-1',
+      width: 320,
+      height: 240,
+      frameRate: 30,
+      exact: true,
+      duration: 1,
+    });
+  });
+
+  await t.test('finalizes on ^C and exits 255', async () => {
+    const r = await sh(
+      `media -nostats -y -f avfoundation -i "0:0" live.mkv & pid=$!; sleep 2; kill -INT $pid; wait $pid; echo status=$?; ${probe('live.mkv')}`
+    );
+    assert.match(r.stdout, /^status=255\n/, r.stderr);
+    assert.match(r.stderr, /Exiting normally, received signal 2\.\n$/);
+    recorded(r.stdout.replace(/^status=255\n/, ''), 2, 1);
+    assert.equal((await asked()).duration, undefined);
+  });
+
+  await t.test('stops on q from a terminal and exits 0', async () => {
+    const out = await page.evaluate(async () => {
+      let text = '';
+      const term = await window.kernel.openTerminal(
+        ['sh', '-c', 'media -y -f v4l2 -i /dev/video0 q.webm; echo st=$?'],
+        {
+          cwd: '/tmp',
+          onData: (data) => {
+            text += new TextDecoder().decode(data);
+          },
+        }
+      );
+      while (window.capture.live.size === 0) await new Promise((ok) => setTimeout(ok, 50));
+      await new Promise((ok) => setTimeout(ok, 1500));
+      term.write('q');
+      await term.exited;
+      return text;
+    });
+    assert.match(out, /st=0\r?\n/);
+    const r = await sh(probe('q.webm'));
+    assert.equal(r.status, 0, r.stderr);
+    const { streams, format } = JSON.parse(r.stdout);
+    assert.deepEqual(
+      streams.map((s) => s.codec_type),
+      ['video']
+    );
+    assert.ok(Math.abs(Number(format.duration) - 1.5) <= 0.75, `duration ${format.duration}`);
+  });
+
+  await t.test('ends normally when the page ends the recording', async () => {
+    const r = await page.evaluate(
+      async (script) => {
+        const run = window.kernel.run(['sh', '-c', script], { cwd: '/tmp' });
+        while (window.capture.live.size === 0) await new Promise((ok) => setTimeout(ok, 50));
+        await new Promise((ok) => setTimeout(ok, 1500));
+        for (const capture of window.capture.live) capture.end();
+        return run;
+      },
+      `media -nostats -y -f dshow -i video="Fake Camera":audio="Second Fake" ended.mp4 && ${probe('ended.mp4')}`
+    );
+    assert.equal(r.status, 0, r.stderr);
+    recorded(r.stdout, 1.5, 0.75);
+  });
+
+  await t.test('passes a refusal on and leaves no file', async () => {
+    await page.evaluate(() => {
+      window.capture.refuse = 'camera permission is blocked for this site';
+    });
+    const r = await sh(
+      'media -nostats -y -f avfoundation -i 0 -t 1 refused.mp4; echo st=$?; media -y -f avfoundation -i 0 refused.png; ls refused.mp4 refused.png 2>&1'
+    );
+    await page.evaluate(() => {
+      window.capture.refuse = null;
+    });
+    assert.equal(r.stderr, 'media: camera permission is blocked for this site\n'.repeat(2));
+    assert.match(r.stdout, /^st=1\n.*cannot access 'refused\.mp4'.*cannot access 'refused\.png'/s);
   });
 });

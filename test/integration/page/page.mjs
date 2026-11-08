@@ -2,9 +2,9 @@ import { attachKernel, createKernel } from '/kernel/index.js';
 
 const live = new Set();
 
-window.capture = { refuse: null, requests: [], live, audio: [], silent: false };
+window.capture = { refuse: null, requests: [], camera: [], live, audio: [], silent: false };
 
-function fakeMedia() {
+function fakeMedia(sound) {
   const canvas = document.createElement('canvas');
   canvas.width = 320;
   canvas.height = 240;
@@ -25,7 +25,10 @@ function fakeMedia() {
   const sink = audio.createMediaStreamDestination();
   tone.connect(sink);
   tone.start();
-  const stream = new MediaStream([...video.getVideoTracks(), ...sink.stream.getAudioTracks()]);
+  const stream = new MediaStream([
+    ...video.getVideoTracks(),
+    ...(sound ? sink.stream.getAudioTracks() : []),
+  ]);
   const stop = () => {
     clearInterval(timer);
     for (const track of stream.getTracks()) track.stop();
@@ -35,11 +38,12 @@ function fakeMedia() {
   return { stream, stop };
 }
 
-function recording(options, signal) {
-  const media = fakeMedia();
-  const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
-    ? 'video/webm;codecs=vp9,opus'
-    : 'video/webm;codecs=vp8,opus';
+function recording(options, signal, sound = true) {
+  const media = fakeMedia(sound);
+  const audio = sound ? ',opus' : '';
+  const mimeType = MediaRecorder.isTypeSupported(`video/webm;codecs=vp9${audio}`)
+    ? `video/webm;codecs=vp9${audio}`
+    : `video/webm;codecs=vp8${audio}`;
   const recorder = new MediaRecorder(media.stream, { mimeType });
   let chain = Promise.resolve();
   let done = false;
@@ -152,8 +156,17 @@ async function still(type) {
 }
 
 const requests = {
-  kinds: { 'capture.screen': {}, 'audio.record': {} },
+  kinds: { 'capture.screen': {}, 'capture.camera': {}, 'capture.devices': {}, 'audio.record': {} },
   async handle({ kind, options, signal, progress }) {
+    if (kind === 'capture.devices') {
+      return 'video\tcam-1\tFake Camera\naudio\tdefault\tDefault - Fake Microphone\naudio\tfake-2\tSecond Fake\n';
+    }
+    if (kind === 'capture.camera') {
+      window.capture.camera.push(options);
+      if (window.capture.refuse) throw new DOMException(window.capture.refuse, 'NotAllowedError');
+      if (options.type.startsWith('image/')) return still(options.type);
+      return recording(options, signal, options.microphone !== undefined);
+    }
     if (kind === 'audio.record') {
       if (options.devices) return 'default\tDefault - Fake Microphone\nfake-2\tSecond Fake\n';
       window.capture.audio.push(options);
