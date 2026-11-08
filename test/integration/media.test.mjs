@@ -238,7 +238,7 @@ describe('media on the Node kernel', () => {
 });
 
 describe('capture on the Node kernel', () => {
-  it('lists the screen as the only avfoundation device', async () => {
+  it('lists the screen and no microphones without a page', async () => {
     assert.deepEqual(await sh('media -f avfoundation -list_devices true -i ""'), {
       status: 0,
       stdout: '',
@@ -264,6 +264,23 @@ describe('capture on the Node kernel', () => {
     assert.equal((await sh('media -f avfoundation -i 0 -t 1 nopage.mp4')).status, 1);
   });
 
+  it('needs the page for a microphone too', async () => {
+    for (const args of [
+      '-f avfoundation -i ":0" -t 1 nopage.wav',
+      '-f avfoundation -i "none:default" nopage.wav',
+      '-f pulse -i default -t 1 nopage.wav',
+      '-f alsa -i "USB Mic" nopage.wav',
+    ]) {
+      const r = await sh(`media -y ${args}; echo st=$?; ls nopage.wav 2>&1`);
+      assert.equal(
+        r.stderr,
+        "media: capture needs seven's page (no page answers audio.record)\n",
+        args
+      );
+      assert.match(r.stdout, /^st=1\n.*cannot access 'nopage\.wav'/, args);
+    }
+  });
+
   it('refuses cameras, microphones and options it cannot honour, by name', async () => {
     for (const [args, message] of [
       ['-f avfoundation -i 1 x.mp4', '-f avfoundation -i "1": not supported yet'],
@@ -272,12 +289,24 @@ describe('capture on the Node kernel', () => {
         '-f avfoundation -i "FaceTime HD Camera": not supported yet',
       ],
       ['-f avfoundation -i "0:0" x.mp4', '-f avfoundation -i "0:0": not supported yet'],
-      ['-f avfoundation -i ":0" x.m4a', '-f avfoundation -i ":0": not supported yet'],
+      ['-f avfoundation -i "1:Mic" x.mp4', '-f avfoundation -i "1:Mic": not supported yet'],
       ['-f avfoundation -i none x.mp4', '-f avfoundation -i "none": nothing to capture'],
+      [
+        '-f avfoundation -i "none:none" x.wav',
+        '-f avfoundation -i "none:none": nothing to capture',
+      ],
       ['-f v4l2 -i /dev/video0 x.mp4', '-f v4l2 -i "/dev/video0": not supported yet'],
       ['-f dshow -i video=Cam x.mp4', '-f dshow -i "video=Cam": not supported yet'],
-      ['-f pulse -i default x.wav', '-f pulse -i "default": not supported yet'],
-      ['-f alsa -i 0 x.wav', '-f alsa -i "0": not supported yet'],
+      ['-f pulse -list_devices true -i ""', '-list_devices is only for -f avfoundation'],
+      [
+        '-f avfoundation -framerate 30 -i ":0" x.wav',
+        'input option -framerate is not for a microphone',
+      ],
+      [
+        '-f alsa -video_size 640x480 -i default x.wav',
+        'input option -video_size is not for a microphone',
+      ],
+      ['-f pulse -i default', 'at least one output file must be specified'],
       [
         '-f x11grab -i :0.0+100,200 x.mp4',
         'x11grab offsets (+100,200) are not supported; crop with -vf crop=w:h:x:y',
@@ -402,5 +431,191 @@ describe('capture through a page hook on the Node kernel', () => {
     );
     assert.equal(r.stdout, 'st=255\nvideo\naudio\n', r.stderr);
     assert.match(r.stderr, /Exiting normally, received signal 1\.\n$/);
+  });
+});
+
+describe('the microphone through a page hook on the Node kernel', () => {
+  let page;
+  const mic = {
+    refuse: null,
+    hidden: null,
+    fail: false,
+    empty: false,
+    requests: [],
+    live: [],
+    bytes: null,
+  };
+
+  function recording(options, signal) {
+    return new ReadableStream({
+      start(controller) {
+        if (mic.empty) return controller.close();
+        controller.enqueue(mic.bytes);
+        if (mic.fail) {
+          setTimeout(() => controller.error(new Error('the microphone went away')), 300);
+          return;
+        }
+        mic.live.push(controller);
+        const end = () => {
+          try {
+            controller.close();
+          } catch {}
+        };
+        if (options.seconds !== undefined) setTimeout(end, options.seconds * 1000);
+        signal.addEventListener('abort', end, { once: true });
+      },
+    });
+  }
+
+  function brokenScreen() {
+    return new ReadableStream({
+      start(controller) {
+        controller.enqueue(mic.bytes.slice(0, 4000));
+        setTimeout(() => controller.error(new Error('boom')), 300);
+      },
+    });
+  }
+
+  before(async () => {
+    page = await boot({
+      requests: {
+        kinds: { 'audio.record': {}, 'capture.screen': {} },
+        handle: async ({ kind, options, signal }) => {
+          mic.requests.push({ kind, ...options });
+          if (kind === 'capture.screen') return brokenScreen();
+          if (options.devices && mic.hidden) throw new DOMException(mic.hidden, 'NotAllowedError');
+          if (options.devices) return 'default\tDefault - Built-in\nusb-1\tUSB Mic\nanon\t\n';
+          if (mic.refuse) throw new DOMException(mic.refuse, 'NotAllowedError');
+          return recording(options, signal);
+        },
+      },
+    });
+    const made = await page.sh(
+      'media -nostats -i clip.webm -vn -c:a copy -f webm - | cat > mic.webm'
+    );
+    assert.equal(made.status, 0, made.stderr);
+    mic.bytes = new Uint8Array(await page.kernel.readFile('/tmp/mic.webm'));
+  });
+
+  after(() => page?.close());
+
+  const last = () => mic.requests.filter((r) => !r.devices).at(-1);
+  const streams = (file) =>
+    `mediaprobe -v error -show_entries stream=codec_type,codec_name -of csv=p=0 ${file}`;
+
+  it('lists the microphones after the screen, with a name for an empty label', async () => {
+    const r = await page.sh('media -f avfoundation -list_devices true -i ""');
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(
+      r.stderr,
+      [
+        'AVFoundation video devices:',
+        `[0] Capture screen 0`,
+        'AVFoundation audio devices:',
+        '[0] Default - Built-in',
+        '[1] USB Mic',
+        '[2] Microphone 2',
+      ]
+        .map((line) => `[AVFoundation indev @ 0x0] ${line}\n`)
+        .join('')
+    );
+  });
+
+  it('lists the screen and says why when the page refuses the microphones', async () => {
+    mic.hidden = 'capture: denied by the approval judge: no';
+    const r = await page.sh('media -f avfoundation -list_devices true -i ""');
+    mic.hidden = null;
+    assert.equal(r.status, 1);
+    assert.equal(
+      r.stderr,
+      '[AVFoundation indev @ 0x0] AVFoundation video devices:\n[AVFoundation indev @ 0x0] [0] Capture screen 0\n[AVFoundation indev @ 0x0] AVFoundation audio devices:\nmedia: capture: denied by the approval judge: no\n'
+    );
+  });
+
+  it('asks audio.record without the gate, for the device named by index or label', async () => {
+    for (const [args, device] of [
+      ['-f avfoundation -i ":1"', 'usb-1'],
+      ['-f avfoundation -i "none:usb mic"', 'usb-1'],
+      ['-f pulse -i "Microphone 2"', 'anon'],
+      ['-f alsa -i 0', 'default'],
+      ['-f pulse -i default', undefined],
+    ]) {
+      const r = await page.sh(`media -y ${args} -t 1 -c copy m.mkv && ${streams('m.mkv')}`);
+      assert.equal(r.status, 0, `${args}: ${r.stderr}`);
+      assert.equal(r.stdout, 'audio,opus\n', args);
+      const header = { kind: 'audio.record', gate: false, seconds: 1 };
+      assert.deepEqual(last(), device ? { ...header, device } : header, args);
+    }
+  });
+
+  it('copies the Opus into webm and ogg', async () => {
+    for (const out of ['m.webm', 'm.ogg']) {
+      const r = await page.sh(
+        `media -y -f avfoundation -i ":0" -t 1 -c:a copy ${out} && ${streams(out)}`
+      );
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, 'audio,opus\n', out);
+    }
+  });
+
+  it('refuses a device the page does not list', async () => {
+    const r = await page.sh('media -y -f alsa -i 3 -c copy none.mkv; echo st=$?; ls none.mkv 2>&1');
+    assert.equal(r.stderr, 'media: no such audio device: 3\n');
+    assert.match(r.stdout, /^st=1\n.*cannot access 'none\.mkv'/);
+  });
+
+  it('passes the page refusal on and leaves an existing output alone', async () => {
+    mic.refuse = "microphone capture is off in seven's settings";
+    const r = await page.sh(
+      'echo keep > kept.mkv; media -y -f avfoundation -i ":0" -c copy kept.mkv; echo st=$?; cat kept.mkv; media -y -f pulse -i default -c copy gone.mkv; ls gone.mkv 2>&1'
+    );
+    mic.refuse = null;
+    assert.equal(r.stderr, "media: microphone capture is off in seven's settings\n".repeat(2));
+    assert.match(r.stdout, /^st=1\nkeep\n.*cannot access 'gone\.mkv'/);
+  });
+
+  it('says the page sent no audio and writes nothing', async () => {
+    mic.empty = true;
+    const r = await page.sh(
+      'media -y -f pulse -i default -c copy empty.mkv; echo st=$?; ls empty.mkv 2>&1'
+    );
+    mic.empty = false;
+    assert.equal(r.stderr, 'media: the page sent no audio\n');
+    assert.match(r.stdout, /^st=1\n.*cannot access 'empty\.mkv'/);
+  });
+
+  it('removes the output when the page fails partway', async () => {
+    mic.fail = true;
+    const r = await page.sh(
+      'media -nostats -y -f avfoundation -i ":0" -c copy failed.mkv; echo st=$?; ls failed.mkv 2>&1'
+    );
+    mic.fail = false;
+    assert.equal(r.stderr, 'media: the microphone went away\n');
+    assert.match(r.stdout, /^st=1\n.*cannot access 'failed\.mkv'/);
+  });
+
+  it('leaves no empty file when a screen capture fails partway', async () => {
+    const r = await page.sh(
+      'media -nostats -y -f avfoundation -i 0 -c copy c.mkv; echo st=$?; ls c.mkv 2>&1'
+    );
+    assert.match(r.stderr, /boom/);
+    assert.match(r.stdout, /^st=1\n.*cannot access 'c\.mkv'/);
+  });
+
+  it('finalizes on SIGINT and exits 255, and exits 0 when the page ends', async () => {
+    const r = await page.sh(
+      `media -nostats -y -f pulse -i default -c copy int.mkv & pid=$!; sleep 1; kill -INT $pid; wait $pid; echo st=$?; ${streams('int.mkv')}`
+    );
+    assert.equal(r.stdout, 'st=255\naudio,opus\n', r.stderr);
+    assert.match(r.stderr, /Exiting normally, received signal 2\.\n$/);
+    const before = mic.live.length;
+    const ending = page.sh(
+      `media -nostats -y -f pulse -i default -c copy end.mkv; echo st=$?; ${streams('end.mkv')}`
+    );
+    while (mic.live.length === before) await new Promise((ok) => setTimeout(ok, 25));
+    await new Promise((ok) => setTimeout(ok, 500));
+    mic.live.at(-1).close();
+    const e = await ending;
+    assert.equal(e.stdout, 'st=0\naudio,opus\n', e.stderr);
   });
 });

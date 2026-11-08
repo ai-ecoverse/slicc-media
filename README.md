@@ -37,7 +37,7 @@ media -i talk.mp4 -vn -c:a pcm_s16le -ar 16000 -ac 1 talk.wav
 media -i clip.mp4 -c copy -f mpegts - | mediaprobe -
 ```
 
-One input and one output; the input can also be [the screen](#capture). The options:
+One input and one output; the input can also be [the screen or a microphone](#capture). The options:
 
 |                   |                                                                                                                                                                                                                                                             |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -56,6 +56,7 @@ One input and one output; the input can also be [the screen](#capture). The opti
 - **Files** are read and written in place through the kernel's paged files, so neither the input nor the output is held in memory.
 - **Overwrite:** an existing output needs `-y`; on a terminal `media` asks, otherwise it exits 1.
 - **Progress** goes to stderr (`time=00:00:01.20 progress=40%`), one updating line on a terminal, every 10% otherwise; `-nostats` turns it off.
+- **The output** is opened (and an existing one truncated) only when the first bytes for it are ready, so an input that fails before that leaves no file, and an existing output stays as it was.
 - **^C** (SIGINT) or SIGTERM cancels: `Exiting normally, received signal 2.` and status 255, as FFmpeg does, but the partial output isn't finalized (a [capture](#capture) is).
 - **Not supported**, each refused by name: more than one input or output, `-filter_complex` and every filter not listed above, `-map` other than `0`, `-shortest`, `-pix_fmt` other than `yuv420p`, `-f lavfi` test sources, frame or image output from a file, two-pass, lossless video, and the [capture](#capture) devices not listed there.
 
@@ -67,17 +68,39 @@ media -f avfoundation -i "Capture screen 0" -t 10 -c:v libx264 out.mp4
 media -f avfoundation -capture_cursor 1 -i 0 screen.webm
 media -f x11grab -i :0.0 -t 5 -c copy screen.mkv
 media -f gdigrab -i desktop -frames:v 1 shot.png
+media -f avfoundation -i ":0" -t 5 -c:a pcm_s16le talk.wav
+media -f pulse -i default -ar 16000 -ac 1 note.wav
+media -f alsa -i "USB Mic" -t 60 -c:a copy talk.webm
 ```
 
+### The screen
+
 `media` records the screen by asking seven's page, as a `capture.screen` request on the kernel's [`/dev/embedder`](https://github.com/ai-ecoverse/slicc-kernel#devembedder): the page module of [slicc-capture](https://github.com/ai-ecoverse/slicc-capture), with slicc-bios's prompt and guards in front. The user picks the screen, a window or a tab in Chrome's picker; nothing here can skip it. The page records with `MediaRecorder` (WebM, VP9 or VP8, with Opus when there is audio) and sends a chunk every 250 ms, which `media` reads as it arrives and remuxes, or with `-c:v`, `-vf` or `-r` transcodes, into the output, as for any other input.
-- **Devices:** `-f avfoundation` lists, as on macOS, the cameras and then `Capture screen 0`, and no microphones. There are no cameras yet, so the screen is `-i 0` or `-i "Capture screen 0"` (in any case), and a spec `"V:A"` takes `none` or nothing for `A`. `-list_devices true` prints the list on stderr, in avfoundation's lines, and exits 0.
+- **Devices:** `-f avfoundation` lists, as on macOS, the cameras and then `Capture screen 0` as video devices, and the microphones as audio devices. There are no cameras yet, so the screen is `-i 0` or `-i "Capture screen 0"` (in any case). `-list_devices true` prints the list on stderr, in avfoundation's lines, and exits 0:
+  ```
+  [AVFoundation indev @ 0x0] AVFoundation video devices:
+  [AVFoundation indev @ 0x0] [0] Capture screen 0
+  [AVFoundation indev @ 0x0] AVFoundation audio devices:
+  [AVFoundation indev @ 0x0] [0] Default - MacBook Pro Microphone
+  [AVFoundation indev @ 0x0] [1] USB Mic
+  ```
+  The microphones come from the page (an `audio.record` request with `devices: true`); the browser gives their labels only once seven may use the microphone, and a microphone without one is listed as `Microphone N`. Where no page answers, the list has the screen and no microphones; where the page refuses to list them (a denial, for example), `media` prints the screen entry, then `media: <message>`, and exits 1.
 - **Aliases:** `-f x11grab -i <anything>` and `-f gdigrab -i desktop` are the screen; `-f gdigrab -i title=<name>` starts the picker at windows, and the user still picks one.
 - **Options:** `-t` (or `-to`) stops the recording after that long and trims to it; `-ss` trims the start. `-capture_cursor 1` asks for the cursor, `0` for none. `-framerate` is accepted, but the browser decides the rate, which varies; `-r` or `-vf fps=` make it constant. `-pixel_format`, `-probesize`, `-thread_queue_size` and `-rtbufsize` are accepted and change nothing. Refused by name: `-video_size` (scale with `-vf scale`), x11grab offsets `+x,y` (crop with `-vf crop`), `-draw_mouse` and `-capture_mouse_clicks`.
 - **Stills:** `-frames:v 1`, `-update 1` or an image output (`.png`, `.jpg`, `.jpeg`, `.webp`) ask the page for one frame in that format, and `media` writes its bytes unchanged. A filter, a codec or a trim on a still is refused by name, as is another frame count.
 - **Stopping:** without `-t`, a recording runs until `q` on a terminal's stdin (not with `-nostdin`), ^C, `SIGTERM` or `SIGHUP`, or until the user clicks Chrome's **Stop sharing**. Each of them closes the request and finalizes the output, so the file plays; the last quarter second may be lost. After a signal `media` prints `Exiting normally, received signal N.` and exits 255; after `q` or Stop sharing it exits 0.
 - **Progress:** a capture has no known length, so there is no `time=` line. The page's own lines reach stderr as `media: <line>`, such as `media: recording…`.
 - **Errors**, each with exit 1: `media: user cancelled, permission denied, or the surface is protected` for a refused prompt, a closed picker or a protected surface; `media: capture needs seven's page (no page answers capture.screen)` in the kernel's Node entry, or in a shell whose page doesn't answer it; any other error from the page as `media: <message>`.
-- **Not supported yet:** cameras and microphones, so `-f avfoundation -i 1` (a camera), an audio part (`"0:0"`, `":0"`), `-f v4l2`, `-f dshow`, `-f pulse` and `-f alsa` are each refused as `media: -f <format> -i "<spec>": not supported yet`.
+- **Not supported yet:** cameras, so `-f avfoundation -i 1`, a spec with both a video and an audio part (`"0:0"`), `-f v4l2` and `-f dshow` are each refused as `media: -f <format> -i "<spec>": not supported yet`.
+
+### A microphone
+
+`media` records a microphone by asking seven's page for an `audio.record` request without the speech gate (`{"kind":"audio.record","gate":false,"device":…,"seconds":…}`): the page module of [slicc-audio](https://github.com/ai-ecoverse/slicc-audio), with slicc-bios's consent, Microphone switch and recording indicator in front. The page sends WebM Opus from the first chunk, silence included, every 250 ms, and `media` reads it as it arrives, as it does the screen.
+- **Devices:** `-f avfoundation -i ":A"` (or `"none:A"`) records the microphone `A`: an index into the list above, a name from it (in any case), or `default`. `-f pulse -i default|N|NAME` and `-f alsa -i default|N|NAME` are the same. `default`, or no name, is the browser's default microphone, asked for without a device; any other spec makes `media` list the microphones first, and one that isn't there is `media: no such audio device: <spec>`.
+- **Output:** any audio container `media` writes: `wav`, `ogg`, `webm`, `mkv`, `m4a` (`-c:a aac`, where the browser encodes AAC), `mp3` only where the browser has an MP3 encoder. `-c:a copy` keeps the page's Opus into webm, mkv or ogg without re-encoding; `-ar`, `-ac` and `-af aresample=RATE` work after `-i`, as for files.
+- **Options:** `-t` (or `-to`) asks the page for that many seconds (`seconds`) and trims to it; `-ss` trims the start. Video options (`-framerate`, `-video_size`, `-capture_cursor`) are refused for a microphone by name, as are filters and frame counts.
+- **Stopping:** as for the screen: `-t`, `q` on a terminal's stdin, ^C, `SIGTERM` or `SIGHUP`, or Stop in seven's recording indicator. Each finalizes the file; a signal exits 255, the rest 0.
+- **Errors**, each with exit 1 and no output file left behind: the page's own refusal as `media: <message>` (`media: microphone capture is off in seven's settings`, a denial, `media: nobody clicked within 5 min`); `media: the page sent no audio` when the recording ends empty; `media: capture needs seven's page (no page answers audio.record)` without a page. When the page fails partway, `media` removes the output it had started.
 
 ## Licences
 
