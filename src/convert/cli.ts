@@ -10,20 +10,20 @@ import {
 import {
   type Capture,
   captureMessage,
-  codeOf,
+  catalog,
   deviceList,
   type Header,
+  headerOf,
+  kindOf,
   type LiveCapture,
-  lasting,
   live,
-  type Microphone,
-  microphoneOf,
   microphones,
-  NoPage,
+  type Named,
   parseCapture,
   quitOnQ,
   readAll,
   request,
+  unanswered,
 } from '../capture.ts';
 import { type Context, message, UsageError } from '../context.ts';
 import { type OpenedSource, openSource, openTarget, STDIN_NAMES, STDOUT_NAMES } from '../io.ts';
@@ -60,14 +60,18 @@ ignored.
   -s WxH, -r FPS, -g N, -ac N, -ar RATE, -metadata key=value, -movflags faststart
   -nostats, -v LEVEL   no progress, or quiet/error to print errors only
 
+  -f avfoundation -i "0:0"
+                       record a camera and a microphone through seven's page,
+                       by index or name, until -t, q or ^C (also -f v4l2 -i
+                       /dev/video0, -f dshow -i video=NAME); -video_size WxH
+                       and -framerate N ask the camera for them
   -f avfoundation -i "Capture screen 0"
-                       record the screen through seven's page, until -t, q or
-                       ^C (also -f x11grab, -f gdigrab -i desktop); with
-                       -frames:v 1 and a .png, .jpg or .webp, take a still;
-                       -list_devices true -i "" lists the devices
+                       record the screen (also -f x11grab, -f gdigrab -i desktop)
   -f avfoundation -i ":0"
-                       record a microphone, by index or name (also -f pulse,
-                       -f alsa -i default)
+                       record a microphone (also -f pulse, -f alsa -i default)
+  -frames:v 1 OUT.png  take a still from a camera or the screen (.jpg, .webp too)
+  -f avfoundation -list_devices true -i ""
+                       list the cameras, the screen and the microphones
 
   -version, -encoders, -decoders, -formats, -h
 `;
@@ -227,56 +231,57 @@ function captureInvocation(inv: Invocation, capture: Recording | null): Invocati
 interface Job {
   inv: Invocation;
   plan?: Plan;
-  capture: Recording | null;
+  header?: Header;
 }
 
 async function listDevices(ctx: Context): Promise<number> {
-  let found: Microphone[] = [];
+  let cameras: Named[] = [];
+  let mics: Named[] = [];
   let failure: unknown;
   try {
-    found = await microphones(ctx);
+    const found = await catalog(ctx);
+    cameras = found?.cameras ?? [];
+    mics = found ? found.microphones : await microphones(ctx);
   } catch (err) {
-    if (!(err instanceof NoPage) && codeOf(err) !== 'ENOTSUP') failure = err;
+    if (!unanswered(err)) failure = err;
   }
-  await ctx.write(2, deviceList(found));
+  await ctx.write(2, deviceList({ cameras, microphones: mics }));
   if (failure === undefined) return 0;
-  await ctx.write(2, `${NAME}: ${captureMessage(failure, 'audio.record')}\n`);
+  await ctx.write(2, `${NAME}: ${captureMessage(failure, 'capture.devices')}\n`);
   return 1;
 }
 
 async function prepare(ctx: Context, args: string[]): Promise<Job | number> {
+  let kind = '';
   try {
     const inv = parseArgs(args);
     const capture = parseCapture(inv);
     if (capture?.list) return listDevices(ctx);
-    if (capture?.still) return { inv, capture };
-    const pipe = inv.outputPath !== null && STDOUT_NAMES.has(inv.outputPath);
-    const toPipe = pipe && (await ctx.fdStatus(1)).type !== 'file';
-    return { inv, capture, plan: makePlan(captureInvocation(inv, capture), toPipe) };
+    let plan: Plan | undefined;
+    if (!capture?.still) {
+      const pipe = inv.outputPath !== null && STDOUT_NAMES.has(inv.outputPath);
+      const toPipe = pipe && (await ctx.fdStatus(1)).type !== 'file';
+      plan = makePlan(captureInvocation(inv, capture), toPipe);
+    }
+    if (!capture) return { inv, plan };
+    kind = kindOf(capture);
+    return { inv, plan, header: await headerOf(ctx, capture, plan?.trim?.end) };
   } catch (err) {
-    if (!(err instanceof UsageError)) throw err;
-    await ctx.write(2, `${NAME}: ${err.message}\n`);
+    if (err instanceof UsageError) await ctx.write(2, `${NAME}: ${err.message}\n`);
+    else if (kind) await ctx.write(2, `${NAME}: ${captureMessage(err, kind)}\n`);
+    else throw err;
     return 1;
   }
 }
 
-async function headerOf(ctx: Context, capture: Recording, plan: Plan): Promise<Header> {
-  let header = capture.header;
-  if (header.kind === 'audio.record' && capture.microphone !== undefined) {
-    const device = microphoneOf(await microphones(ctx), capture.microphone);
-    if (device !== undefined) header = { ...header, device };
-  }
-  return lasting(header, plan.trim?.end);
-}
-
-async function openInput(ctx: Context, job: Job, plan: Plan): Promise<OpenedSource | null> {
-  const { inv, capture } = job;
+async function openInput(ctx: Context, job: Job): Promise<OpenedSource | null> {
+  const { inv, header } = job;
   try {
-    if (!capture) return await openSource(ctx, inv.inputs[0].path);
-    return live(await request(ctx, await headerOf(ctx, capture, plan)));
+    if (!header) return await openSource(ctx, inv.inputs[0].path);
+    return live(await request(ctx, header));
   } catch (err) {
-    const text = capture
-      ? `${NAME}: ${captureMessage(err, capture.header.kind)}`
+    const text = header
+      ? `${NAME}: ${captureMessage(err, header.kind)}`
       : `${inv.inputs[0].path}: ${message(err)}`;
     await ctx.write(2, `${text}\n`);
     return null;
@@ -290,7 +295,7 @@ async function failed(
   capture: LiveCapture | undefined,
   signal: number
 ): Promise<number> {
-  const kind = job.capture?.header.kind ?? 'capture.screen';
+  const kind = job.header?.kind ?? 'capture.screen';
   if (capture?.failure() !== undefined) {
     await ctx.write(2, `${NAME}: ${captureMessage(capture.failure(), kind)}\n`);
     return 1;
@@ -310,9 +315,9 @@ async function run(ctx: Context, job: Job, plan: Plan): Promise<number> {
   const { inv } = job;
   const outPath = inv.outputPath as string;
   if (!(await mayOverwrite(ctx, inv, outPath))) return 1;
-  const source = await openInput(ctx, job, plan);
+  const source = await openInput(ctx, job);
   if (!source) return 1;
-  const capture = job.capture ? (source as LiveCapture) : undefined;
+  const capture = job.header ? (source as LiveCapture) : undefined;
   let target: Awaited<ReturnType<typeof openTarget>> | undefined;
   let conversion: Conversion | undefined;
   let signal = 0;
@@ -372,6 +377,6 @@ export async function runMedia(ctx: Context, args: string[]): Promise<number> {
   if (shown !== null) return shown;
   const job = await prepare(ctx, args);
   if (typeof job === 'number') return job;
-  if (job.capture?.still) return runStill(ctx, job.inv, job.capture.header);
+  if (!job.plan) return runStill(ctx, job.inv, job.header as Header);
   return run(ctx, job, job.plan as Plan);
 }
